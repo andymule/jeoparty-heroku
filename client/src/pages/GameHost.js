@@ -162,6 +162,16 @@ const StatusMessage = styled.div`
   margin-bottom: 15px;
 `;
 
+const TimerBar = styled.div`
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 10px;
+  background-color: var(--jeopardy-value);
+  width: ${props => props.$progress}%;
+  transition: width ${props => props.$running ? '0.1s' : '0s'} linear;
+`;
+
 const GameHost = () => {
   const { roomCode } = useParams();
   const navigate = useNavigate();
@@ -177,10 +187,14 @@ const GameHost = () => {
   const [playerAnswer, setPlayerAnswer] = useState(null);
   const [selectingPlayer, setSelectingPlayer] = useState(null);
   const [error, setError] = useState(null);
+  const [timerProgress, setTimerProgress] = useState(100);
+  const [timerRunning, setTimerRunning] = useState(false);
   const socketRef = useRef(null);
   const speechSynthesis = useRef(window.speechSynthesis);
   const buzzerSound = useRef(null);
   const [canBuzzIn, setCanBuzzIn] = useState(false);
+  const timerRef = useRef(null);
+  const timerIntervalRef = useRef(null);
 
   // Initialize the buzzer sound
   useEffect(() => {
@@ -212,6 +226,11 @@ const GameHost = () => {
         if (buzzerSound.current) {
           buzzerSound.current.play().catch(e => console.log('Error playing sound:', e));
         }
+        
+        // Notify server that reading is complete and players can buzz in
+        if (socket && socket.connected) {
+          socket.emit('hostFinishedReading', roomCode);
+        }
       };
       
       // Start speaking after a short delay
@@ -225,12 +244,72 @@ const GameHost = () => {
         setCanBuzzIn(false);
       };
     }
-  }, [currentQuestion, showQuestion]);
+  }, [currentQuestion, showQuestion, roomCode, socket]);
   
   // Reset buzzing state when a player buzzes in
   useEffect(() => {
     if (buzzedPlayer) {
       setCanBuzzIn(false);
+    }
+  }, [buzzedPlayer]);
+
+  // Timer effect to handle 5-second timeout
+  useEffect(() => {
+    if (canBuzzIn && showQuestion && !buzzedPlayer && !answerRevealed) {
+      // Start the 5 second timer
+      setTimerRunning(true);
+      setTimerProgress(100);
+      
+      // Clear any existing timers
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      
+      // Set up interval to update the progress bar
+      timerIntervalRef.current = setInterval(() => {
+        setTimerProgress(prev => {
+          const newProgress = prev - 2; // Decrease by 2% every 100ms
+          return Math.max(0, newProgress);
+        });
+      }, 100);
+      
+      // Set up timeout for the 5 second limit
+      timerRef.current = setTimeout(() => {
+        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+        setTimerRunning(false);
+        
+        // Only handle timeout if no one has buzzed in
+        if (!buzzedPlayer && socket && socket.connected) {
+          console.log('Time expired - no one buzzed in');
+          socket.emit('timeExpired', roomCode);
+          
+          // Reveal the answer since no one got it
+          setAnswerRevealed(true);
+          
+          // After 3 seconds, return to the board
+          setTimeout(() => {
+            handleTimeoutReturn();
+          }, 3000);
+        }
+      }, 5000);
+      
+      return () => {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      };
+    } else {
+      // Stop the timer if conditions aren't met
+      setTimerRunning(false);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    }
+  }, [canBuzzIn, showQuestion, buzzedPlayer, answerRevealed, roomCode, socket]);
+
+  // Reset the timer when a player buzzes in
+  useEffect(() => {
+    if (buzzedPlayer) {
+      setTimerRunning(false);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     }
   }, [buzzedPlayer]);
 
@@ -410,6 +489,36 @@ const GameHost = () => {
     }
   };
 
+  // Handle returning to the board when timer expires
+  const handleTimeoutReturn = () => {
+    if (socket && socket.connected) {
+      // Mark the question as revealed in the board data
+      if (currentQuestion) {
+        const updatedBoard = { ...board };
+        if (updatedBoard[currentQuestion.category] && 
+            updatedBoard[currentQuestion.category][currentQuestion.valueIndex]) {
+          updatedBoard[currentQuestion.category][currentQuestion.valueIndex].revealed = true;
+        }
+        setBoard(updatedBoard);
+      }
+      
+      // Return to board view
+      setShowQuestion(false);
+      setCurrentQuestion(null);
+      setAnswerRevealed(false);
+      setBuzzedPlayer(null);
+      setPlayerAnswer(null);
+      
+      // Keep the same selecting player (last active player selects next)
+      if (selectingPlayer) {
+        socket.emit('returnToBoard', {
+          roomCode,
+          selectingPlayerId: selectingPlayer.id
+        });
+      }
+    }
+  };
+
   return (
     <GameHostContainer>
       <GameHeader>
@@ -476,10 +585,18 @@ const GameHost = () => {
                 </PlayerAnswer>
               )}
               
-              {!buzzedPlayer && !playerAnswer && (
+              {!buzzedPlayer && !playerAnswer && !answerRevealed && (
                 <Button onClick={handleRevealAnswer} disabled={answerRevealed}>
                   Reveal Answer
                 </Button>
+              )}
+              
+              {/* Timer bar at the bottom of the question display */}
+              {canBuzzIn && !buzzedPlayer && !answerRevealed && (
+                <TimerBar 
+                  $progress={timerProgress}
+                  $running={timerRunning}
+                />
               )}
             </QuestionDisplay>
           )}

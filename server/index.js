@@ -313,17 +313,14 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle player buzz attempt
+  // Handle player buzz
   socket.on('buzz', (roomCode) => {
-    console.log(`Buzz received from player in room ${roomCode}`);
-    
-    // Validate inputs
     if (!roomCode) {
       console.error('No room code provided for buzz');
       return socket.emit('error', { message: 'Room code is required' });
     }
     
-    // Convert room code to uppercase for consistency
+    // Convert to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
     const game = games[roomCode];
@@ -353,6 +350,31 @@ io.on('connection', (socket) => {
     }
     
     const player = game.players[playerIndex];
+    const now = Date.now();
+    
+    // Check if buzzing is allowed or if this is an early buzz
+    if (!game.canBuzzIn) {
+      console.log(`Player ${player.name} buzzed in too early`);
+      
+      // Apply early buzz penalty
+      game.earlyBuzzPenalties[player.id] = now + 200; // 0.2 second penalty
+      
+      // Notify just this player of the early buzz
+      socket.emit('earlyBuzz', {
+        playerId: player.id,
+        playerName: player.name,
+        penalty: 0.2
+      });
+      
+      return;
+    }
+    
+    // Check if player has an active penalty
+    if (game.earlyBuzzPenalties[player.id] && now < game.earlyBuzzPenalties[player.id]) {
+      console.log(`Player ${player.name} still has an active buzz penalty`);
+      return socket.emit('error', { message: 'You buzzed in too early. Wait for your penalty to expire.' });
+    }
+    
     console.log(`Player ${player.name} buzzed in for question in room ${roomCode}`);
     
     // Set as the buzzed player - store the whole player object
@@ -581,6 +603,8 @@ io.on('connection', (socket) => {
     game.state = 'questionActive';
     game.gameState = 'questionActive'; // For backward compatibility
     game.buzzedPlayer = null;
+    game.canBuzzIn = false; // Initially buzzing is not allowed
+    game.earlyBuzzPenalties = {}; // Track players who buzzed in early
     
     // Log who selected the question
     const player = game.players.find(p => p.id === socket.id);
@@ -594,6 +618,18 @@ io.on('connection', (socket) => {
       valueIndex,
       selectedBy: socket.id
     });
+    
+    // After a delay (matches host's time to read), enable buzzing
+    setTimeout(() => {
+      if (games[roomCode] && games[roomCode].currentQuestion) {
+        games[roomCode].canBuzzIn = true;
+        io.to(roomCode).emit('buzzerEnabled', {
+          roomCode,
+          questionId: games[roomCode].currentQuestion.text
+        });
+        console.log(`Buzzer enabled for room ${roomCode}`);
+      }
+    }, 5000); // 5 seconds matches the typical time for host to read the question
     
     console.log(`Question selected for room ${roomCode}:`, game.currentQuestion);
   });
@@ -861,6 +897,135 @@ io.on('connection', (socket) => {
     if (games[roomCode] && (socket.id === games[roomCode].hostId || socket.id === games[roomCode].host || true)) { // Allow any player to end for debugging
       endGame(roomCode);
     }
+  });
+  
+  // When a host finishes reading a question
+  socket.on('hostFinishedReading', (roomCode) => {
+    console.log(`Host finished reading question in room ${roomCode}`);
+    
+    if (!roomCode) {
+      console.error('No room code provided');
+      return socket.emit('error', { message: 'Room code is required' });
+    }
+    
+    // Convert to uppercase for consistency
+    roomCode = roomCode.toUpperCase();
+    
+    const game = games[roomCode];
+    if (!game) {
+      console.error(`Game not found for room ${roomCode}`);
+      return socket.emit('error', { message: 'Game not found' });
+    }
+    
+    // Check if this is the host
+    if (socket.id !== game.hostId && socket.id !== game.host) {
+      console.error(`Only the host can signal when reading is finished`);
+      return socket.emit('error', { message: 'Only the host can signal when reading is finished' });
+    }
+    
+    // Set buzzing to be allowed
+    game.canBuzzIn = true;
+    
+    // Emit event to all players in the room
+    io.to(roomCode).emit('buzzerEnabled', {
+      roomCode,
+      questionId: game.currentQuestion?.text
+    });
+    
+    console.log(`Buzzer enabled for room ${roomCode}`);
+  });
+  
+  // When time expires for a question without any buzzes
+  socket.on('timeExpired', (roomCode) => {
+    console.log(`Time expired for question in room ${roomCode}`);
+    
+    if (!roomCode) {
+      console.error('No room code provided');
+      return socket.emit('error', { message: 'Room code is required' });
+    }
+    
+    // Convert to uppercase for consistency
+    roomCode = roomCode.toUpperCase();
+    
+    const game = games[roomCode];
+    if (!game) {
+      console.error(`Game not found for room ${roomCode}`);
+      return socket.emit('error', { message: 'Game not found' });
+    }
+    
+    // Check if this is the host
+    if (socket.id !== game.hostId && socket.id !== game.host) {
+      console.error(`Only the host can signal when time has expired`);
+      return socket.emit('error', { message: 'Only the host can signal when time has expired' });
+    }
+    
+    // Check if there's an active question
+    if (!game.currentQuestion) {
+      console.error(`No active question for room ${roomCode}`);
+      return socket.emit('error', { message: 'No active question' });
+    }
+    
+    // Disable buzzing
+    game.canBuzzIn = false;
+    
+    // Mark the question as revealed in the board
+    const question = game.currentQuestion;
+    if (game.board[question.category] && game.board[question.category][question.valueIndex]) {
+      game.board[question.category][question.valueIndex].revealed = true;
+    }
+    
+    // Emit to all players that time expired
+    io.to(roomCode).emit('timeExpired', {
+      question: game.currentQuestion
+    });
+    
+    console.log(`Time expired for question in room ${roomCode}, no points awarded`);
+  });
+  
+  // Handle returning to the board (either after answer or timeout)
+  socket.on('returnToBoard', (data) => {
+    console.log(`Return to board requested:`, data);
+    
+    if (!data || !data.roomCode) {
+      console.error('No room code provided');
+      return socket.emit('error', { message: 'Room code is required' });
+    }
+    
+    // Convert to uppercase for consistency
+    const roomCode = data.roomCode.toString().toUpperCase();
+    
+    const game = games[roomCode];
+    if (!game) {
+      console.error(`Game not found for room ${roomCode}`);
+      return socket.emit('error', { message: 'Game not found' });
+    }
+    
+    // Reset the game state for next question
+    game.currentQuestion = null;
+    game.buzzedPlayer = null;
+    game.state = 'inProgress';
+    game.gameState = 'inProgress'; // For backward compatibility
+    
+    // Check for selecting player in data
+    if (data.selectingPlayerId) {
+      const selectingPlayer = game.players.find(p => p.id === data.selectingPlayerId);
+      if (selectingPlayer) {
+        game.selectingPlayer = selectingPlayer;
+        console.log(`${selectingPlayer.name} will select the next question`);
+      }
+    }
+    
+    // Notify all players to return to the board
+    io.to(roomCode).emit('returnToBoard', {
+      game: game,
+      board: game.board,
+      selectingPlayerId: game.selectingPlayer?.id
+    });
+    
+    console.log(`Returned to board for room ${roomCode}`);
+    
+    // Check if the game is complete (all questions revealed)
+    checkGameCompletion(roomCode);
   });
 });
 

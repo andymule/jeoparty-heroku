@@ -22,6 +22,8 @@ const GamePlayerContainer = styled.div`
   color: var(--text);
   padding: 20px;
   position: relative;
+  border: ${props => props.$canBuzzIn ? '10px solid white' : 'none'};
+  transition: border 0.3s ease;
 `;
 
 const Header = styled.div`
@@ -60,6 +62,24 @@ const Question = styled.div`
   animation: ${fadeIn} 0.3s ease;
   border: ${props => props.$canBuzzIn ? '5px solid var(--jeopardy-value)' : 'none'};
   box-shadow: ${props => props.$canBuzzIn ? '0 0 20px rgba(255, 215, 0, 0.7)' : 'none'};
+  position: relative;
+  overflow: hidden;
+  
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: ${props => props.$canBuzzIn ? 'linear-gradient(45deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0) 100%)' : 'none'};
+    pointer-events: none;
+    z-index: 1;
+  }
+  
+  ${props => props.$canBuzzIn && css`
+    animation: ${pulse} 1.5s infinite;
+  `}
 `;
 
 const Category = styled.div`
@@ -88,7 +108,7 @@ const BuzzerBtn = styled.button`
   margin: 20px auto;
   cursor: ${props => props.$disabled ? 'not-allowed' : 'pointer'};
   opacity: ${props => props.$disabled ? 0.7 : 1};
-  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+  box-shadow: ${props => props.$active ? '0 0 20px rgba(255, 215, 0, 0.8)' : '0 5px 15px rgba(0, 0, 0, 0.3)'};
   transition: all 0.2s ease;
   animation: ${props => props.$active ? css`${pulse} 1.5s infinite` : 'none'};
 
@@ -247,8 +267,11 @@ const GamePlayer = () => {
   const [board, setBoard] = useState({});
   const [players, setPlayers] = useState([]);
   const [error, setError] = useState('');
+  const [showBuzzer, setShowBuzzer] = useState(false);
+  const [earlyBuzzPenalty, setEarlyBuzzPenalty] = useState(false);
   const socketRef = useRef(null);
   const buzzerSound = useRef(null);
+  const penaltyTimeoutRef = useRef(null);
 
   useEffect(() => {
     console.log(`GamePlayer initializing for room: ${roomCode}`);
@@ -362,18 +385,41 @@ const GamePlayer = () => {
       newSocket.on('questionSelected', (data) => {
         console.log('Question selected:', data);
         setCurrentQuestion(data.question);
-        setCanBuzz(false); // Initially can't buzz, wait for server signal
+        setShowBuzzer(true); // Show buzzer immediately
+        setCanBuzz(false); // But don't enable it yet
         setHasBuzzed(false);
         setJudged(null);
         setAnswer('');
+        setEarlyBuzzPenalty(false);
+        // Explicitly set gameState to questionActive
+        setGameState('questionActive');
+      });
+      
+      // Add handler for buzzer enabled event
+      newSocket.on('buzzerEnabled', (data) => {
+        console.log('Buzzer enabled:', data);
+        setCanBuzz(true);
         
-        // Listen for text-to-speech completion from the host
-        // The server will emit a buzzerEnabled event after the host finishes reading the question
-        setTimeout(() => {
-          // Set canBuzz to true after a delay (typical time for host to read the question)
-          // This is a fallback in case we don't get the signal from the host
-          setCanBuzz(true);
-        }, 5000); // 5 seconds delay as a fallback
+        // Play the buzz-in sound
+        if (buzzerSound.current) {
+          buzzerSound.current.play().catch(e => console.log('Error playing sound:', e));
+        }
+      });
+      
+      // Add handler for early buzz penalty
+      newSocket.on('earlyBuzz', (data) => {
+        console.log('Early buzz penalty:', data);
+        setEarlyBuzzPenalty(true);
+        
+        // Clear any existing timeout
+        if (penaltyTimeoutRef.current) {
+          clearTimeout(penaltyTimeoutRef.current);
+        }
+        
+        // Set timeout to clear penalty after 0.2 seconds
+        penaltyTimeoutRef.current = setTimeout(() => {
+          setEarlyBuzzPenalty(false);
+        }, 200);
       });
       
       const handlePlayerBuzzed = (data) => {
@@ -418,6 +464,15 @@ const GamePlayer = () => {
           setCanSelectQuestion(false);
         }
       });
+
+      // Add event for when time expires on a question
+      newSocket.on('timeExpired', (data) => {
+        console.log('Time expired for question:', data);
+        setCanBuzz(false);
+        // Display a message that time expired
+        setShowBuzzer(false);
+        setJudged(false); // Show incorrect status with custom message
+      });
     };
     
     setupSocketListeners();
@@ -429,6 +484,9 @@ const GamePlayer = () => {
       if (buzzerSound.current) {
         buzzerSound.current.pause();
         buzzerSound.current.src = '';
+      }
+      if (penaltyTimeoutRef.current) {
+        clearTimeout(penaltyTimeoutRef.current);
       }
     };
   }, [roomCode, navigate]);
@@ -486,6 +544,71 @@ const GamePlayer = () => {
       setCanSelectQuestion(false);
     }
   };
+  
+  // Customize status message for timeouts
+  const getStatusMessage = () => {
+    if (judged === null) return '';
+    if (judged === true) return 'Correct! You will select the next question.';
+    if (hasBuzzed) return 'Sorry, that is incorrect.';
+    return 'Time expired! No one answered correctly.';
+  };
+  
+  if (currentQuestion) {
+    return (
+      <GamePlayerContainer $canBuzzIn={canBuzz && !hasBuzzed}>
+        <Header>
+          <Title>Jeoparty! Player</Title>
+          <PlayerInfo>
+            {playerName || 'Guest'} - ${score}
+          </PlayerInfo>
+        </Header>
+        
+        <Question $canBuzzIn={canBuzz && !hasBuzzed}>
+          <Category>{currentQuestion.category}</Category>
+          <Value>${currentQuestion.value}</Value>
+          {currentQuestion.text}
+        </Question>
+        
+        {showBuzzer && !hasBuzzed ? (
+          <BuzzerBtn 
+            onClick={handleBuzz} 
+            $active={canBuzz && !earlyBuzzPenalty}
+            $disabled={!canBuzz || earlyBuzzPenalty}
+            disabled={!canBuzz || earlyBuzzPenalty}
+          >
+            {earlyBuzzPenalty ? 'PENALTY' : 'BUZZ'}
+          </BuzzerBtn>
+        ) : (
+          hasBuzzed && (
+            judged === null ? (
+              <form onSubmit={handleSubmitAnswer}>
+                <AnswerInput 
+                  type="text" 
+                  value={answer}
+                  onChange={(e) => setAnswer(e.target.value)}
+                  placeholder="Your answer..."
+                  autoFocus
+                />
+                <SubmitBtn type="submit" disabled={!answer.trim()}>
+                  Submit Answer
+                </SubmitBtn>
+              </form>
+            ) : (
+              <Status $correct={judged}>
+                {getStatusMessage()}
+              </Status>
+            )
+          )
+        )}
+        
+        {judged === false && !hasBuzzed && (
+          <Status $correct={false}>
+            {getStatusMessage()}
+          </Status>
+        )}
+      </GamePlayerContainer>
+    );
+  }
   
   if (gameState === 'connecting' || gameState === 'error') {
     return (
@@ -572,15 +695,17 @@ const GamePlayer = () => {
     );
   }
   
-  if (gameState === 'inProgress') {
+  if (gameState === 'inProgress' || gameState === 'questionActive') {
     return (
       <GamePlayerContainer>
         <Header>
-          <Title>Jeoparty!</Title>
-          <PlayerInfo>Score: ${score}</PlayerInfo>
+          <Title>Jeoparty! Player</Title>
+          <PlayerInfo>
+            {playerName || 'Guest'} - ${score}
+          </PlayerInfo>
         </Header>
         
-        {canSelectQuestion && (
+        {canSelectQuestion ? (
           <>
             <SelectingMessage>Your turn to select a question!</SelectingMessage>
             <MiniBoard>
@@ -594,15 +719,14 @@ const GamePlayer = () => {
                 <MiniGridRow key={valueIndex}>
                   {categories.map((category, categoryIndex) => {
                     const revealed = board[category]?.[valueIndex]?.revealed;
-                    const value = board[category]?.[valueIndex]?.value;
-                    
                     return (
                       <MiniCell 
                         key={`${categoryIndex}-${valueIndex}`}
+                        onClick={() => handleSelectQuestion(categoryIndex, valueIndex)}
                         $revealed={revealed}
-                        onClick={() => !revealed && handleSelectQuestion(categoryIndex, valueIndex)}
+                        disabled={revealed}
                       >
-                        {revealed ? '' : `$${value}`}
+                        ${board[category]?.[valueIndex]?.value || (valueIndex + 1) * 200}
                       </MiniCell>
                     );
                   })}
@@ -610,9 +734,7 @@ const GamePlayer = () => {
               ))}
             </MiniBoard>
           </>
-        )}
-        
-        {!canSelectQuestion && (
+        ) : (
           <WaitingMessage>
             <h2>Waiting for next question...</h2>
           </WaitingMessage>
@@ -624,48 +746,14 @@ const GamePlayer = () => {
   return (
     <GamePlayerContainer>
       <Header>
-        <Title>Jeoparty!</Title>
-        <PlayerInfo>Score: ${score}</PlayerInfo>
+        <Title>Jeoparty! Player</Title>
+        <PlayerInfo>
+          {playerName || 'Guest'} - ${score}
+        </PlayerInfo>
       </Header>
-      
-      {currentQuestion && (
-        <Question $canBuzzIn={canBuzz && !hasBuzzed}>
-          <Category>{currentQuestion.category}</Category>
-          <Value>${currentQuestion.value}</Value>
-          {currentQuestion.text}
-        </Question>
-      )}
-      
-      {!hasBuzzed && (
-        <BuzzerBtn 
-          onClick={handleBuzz}
-          $disabled={!canBuzz}
-          $active={canBuzz}
-        >
-          {canBuzz ? 'BUZZ IN!' : 'Wait...'}
-        </BuzzerBtn>
-      )}
-      
-      {hasBuzzed && (
-        <form onSubmit={handleSubmitAnswer}>
-          <AnswerInput
-            type="text"
-            placeholder="Your Answer"
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            autoFocus
-          />
-          <SubmitBtn type="submit" disabled={!answer.trim()}>
-            Submit Answer
-          </SubmitBtn>
-        </form>
-      )}
-      
-      {judged !== null && (
-        <Status $correct={judged}>
-          {judged ? 'Correct!' : 'Incorrect!'}
-        </Status>
-      )}
+      <WaitingMessage>
+        <h2>Waiting for game action...</h2>
+      </WaitingMessage>
     </GamePlayerContainer>
   );
 };
