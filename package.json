@@ -1,0 +1,30 @@
+{
+  "name": "jeoparty",
+  "version": "1.0.0",
+  "description": "A multiplayer Jeopardy-style game with desktop host and mobile clients",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "cd server && npm start",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm start",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "build": "cd client && npm run build",
+    "heroku-postbuild": "NPM_CONFIG_PRODUCTION=false npm install --prefix client && npm run build --prefix client"
+  },
+  "keywords": [
+    "jeopardy",
+    "game",
+    "multiplayer",
+    "trivia",
+    "websockets"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": "18.x",
+    "npm": "9.x"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+} 

@@ -1,0 +1,77 @@
+:root {
+  --background: #060ce9;
+  --text: #ffffff;
+  --jeopardy-board: #060ce9;
+  --jeopardy-value: #ffcc00;
+  --jeopardy-category: #ffffff;
+  --jeopardy-selected: #1a237e;
+  --jeopardy-correct: #4caf50;
+  --jeopardy-incorrect: #f44336;
+  --jeopardy-buzzed: #ff9800;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--background);
+  color: var(--text);
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Button pulse animation for buzz in */
+@keyframes buzzPulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 215, 0, 0.7);
+  }
+  70% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 20px rgba(255, 215, 0, 0);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 215, 0, 0);
+  }
+}
+
+/* Active buzzer highlight */
+.active-buzzer {
+  animation: buzzPulse 1.5s infinite;
+  border: 5px solid var(--jeopardy-correct) !important;
+  background-color: #f44336 !important;
+  color: white !important;
+}
+
+/* TV optimized display */
+@media (min-width: 1080px) {
+  .tv-display {
+    font-size: 1.2rem;
+  }
+}
+
+/* Make mobile interface more touch-friendly */
+@media (max-width: 768px) {
+  button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  input {
+    font-size: 16px !important; /* Prevent zoom on iOS */
+    min-height: 44px;
+  }
+} 

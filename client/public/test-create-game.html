@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jeoparty Game Creation Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: #060CE9;
+      color: white;
+    }
+    h1 {
+      text-align: center;
+    }
+    .card {
+      background: rgba(0, 0, 0, 0.5);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 10px 15px;
+      background-color: #DDB72C;
+      color: #060CE9;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover {
+      background-color: #FFD700;
+    }
+    #results {
+      white-space: pre-wrap;
+      background-color: #333;
+      padding: 10px;
+      border-radius: 4px;
+      overflow: auto;
+      max-height: 400px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Jeoparty Game Creation Test</h1>
+  
+  <div class="card">
+    <h2>API Test</h2>
+    <button id="testApiBtn">Test Game Creation API</button>
+    <button id="testSocketBtn">Test Socket Connection</button>
+    <button id="clearBtn">Clear Results</button>
+  </div>
+  
+  <div class="card">
+    <h2>Results</h2>
+    <div id="results"></div>
+  </div>
+  
+  <script>
+    const results = document.getElementById('results');
+    const testApiBtn = document.getElementById('testApiBtn');
+    const testSocketBtn = document.getElementById('testSocketBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    
+    function log(message) {
+      if (typeof message === 'object') {
+        results.innerHTML += JSON.stringify(message, null, 2) + '\n';
+      } else {
+        results.innerHTML += message + '\n';
+      }
+      results.scrollTop = results.scrollHeight;
+    }
+    
+    clearBtn.addEventListener('click', () => {
+      results.innerHTML = '';
+    });
+    
+    testApiBtn.addEventListener('click', async () => {
+      log('Testing game creation API...');
+      
+      try {
+        // Make a direct fetch to the API endpoint
+        const startTime = Date.now();
+        log(`Sending request to /api/games/create at ${new Date().toISOString()}`);
+        
+        const response = await fetch('/api/games/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            playerName: 'TestHost'
+          })
+        });
+        
+        const endTime = Date.now();
+        log(`Response received in ${endTime - startTime}ms`);
+        log(`Status: ${response.status} ${response.statusText}`);
+        
+        // Log headers
+        const headers = {};
+        response.headers.forEach((value, key) => {
+          headers[key] = value;
+        });
+        log('Response headers:');
+        log(headers);
+        
+        // Read the response text ONCE
+        const responseText = await response.text();
+        log('Raw response text:');
+        log(responseText);
+        
+        // Try to parse the text as JSON
+        try {
+          const data = JSON.parse(responseText);
+          log('Parsed JSON data:');
+          log(data);
+          
+          if (data.success) {
+            log(`✅ SUCCESS: Created game with room code ${data.roomCode}`);
+          } else {
+            log(`❌ ERROR: ${data.error || 'Unknown error'}`);
+          }
+        } catch (parseError) {
+          log(`❌ ERROR: JSON parse error - ${parseError.message}`);
+        }
+      } catch (error) {
+        log(`❌ ERROR: ${error.message}`);
+      }
+    });
+    
+    testSocketBtn.addEventListener('click', async () => {
+      log('Testing socket connection...');
+      
+      // We need to load socket.io-client first
+      if (!window.io) {
+        log('Loading socket.io-client...');
+        const script = document.createElement('script');
+        script.src = 'https://cdn.socket.io/4.5.4/socket.io.min.js';
+        script.onload = initSocketTest;
+        script.onerror = () => log('❌ Failed to load socket.io-client');
+        document.head.appendChild(script);
+      } else {
+        initSocketTest();
+      }
+      
+      function initSocketTest() {
+        try {
+          log('Connecting to Socket.IO server...');
+          const socket = io();
+          
+          socket.on('connect', () => {
+            log(`✅ Connected to server with socket ID: ${socket.id}`);
+            
+            log('Emitting createGame event...');
+            socket.emit('createGame', {
+              playerName: 'SocketTestHost'
+            });
+          });
+          
+          socket.on('gameCreated', (data) => {
+            log('Received gameCreated event:');
+            log(data);
+            log(`✅ SUCCESS: Created game with room code ${data.roomCode}`);
+            
+            // Disconnect after successful test
+            socket.disconnect();
+          });
+          
+          socket.on('error', (error) => {
+            log('Received error event:');
+            log(error);
+            log(`❌ ERROR: ${error.message || 'Unknown socket error'}`);
+          });
+          
+          socket.on('connect_error', (error) => {
+            log(`❌ Connection error: ${error.message}`);
+          });
+          
+          socket.on('disconnect', (reason) => {
+            log(`Socket disconnected: ${reason}`);
+          });
+          
+        } catch (error) {
+          log(`❌ ERROR: ${error.message}`);
+        }
+      }
+    });
+  </script>
+</body>
+</html> 
