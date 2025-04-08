@@ -45,26 +45,14 @@ A multiplayer Jeopardy-style game where a host displays the game board on a desk
    npm install
    ```
 
-3. Set up the dataset:
-   - Download the dataset from [jwolle1/jeopardy_clue_dataset](https://github.com/jwolle1/jeopardy_clue_dataset)
-   - Place the combined_season1-40.tsv file in the data directory
-   - The application will automatically load the dataset at startup
-
 ### Running the Application
 
-1. Start the server:
+1. Start the server and client:
    ```
-   cd server
-   npm run dev
-   ```
-
-2. Start the client:
-   ```
-   cd client
-   npm start
+      npm run dev
    ```
 
-3. Access the application:
+2. Access the application:
    - Main game board (host): http://localhost:3000
    - Connect players by sharing the room code displayed on the host screen
 
@@ -74,7 +62,6 @@ The Jeoparty application loads the entire Jeopardy clue dataset (combined_season
 
 - Fast access to all 88,000+ questions without database queries
 - No database setup or maintenance required
-- Full functionality even in environments where a database is not available
 
 ## Deployment to Heroku
 
@@ -105,8 +92,3 @@ The Jeoparty application loads the entire Jeopardy clue dataset (combined_season
 ## Acknowledgements
 
 - [jwolle1/jeopardy_clue_dataset](https://github.com/jwolle1/jeopardy_clue_dataset) for the comprehensive Jeopardy questions database
-- Jeopardy! is a registered trademark of Jeopardy Productions, Inc.
-
-## License
-
-This project is intended for educational purposes. All Jeopardy data is owned by Jeopardy Productions, Inc. 
