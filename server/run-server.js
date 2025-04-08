@@ -53,6 +53,7 @@ app.post('/api/games/create', (req, res) => {
     
     // Validate input
     const playerName = req.body?.playerName || 'TestHost';
+    const yearRange = req.body?.yearRange || { start: 1984, end: 2024 };
     
     // Generate a room code
     const roomCode = generateRoomCode();
@@ -73,7 +74,8 @@ app.post('/api/games/create', (req, res) => {
         connected: true
       }],
       gameState: 'waiting',
-      startTime: Date.now()
+      startTime: Date.now(),
+      yearRange: yearRange // Store the year range for game generation
     };
     
     console.log(`REST API: Game created with room code ${roomCode}`);

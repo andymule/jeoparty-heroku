@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import io from 'socket.io-client';
+import axios from 'axios';
 
 const HomeContainer = styled.div`
   display: flex;
@@ -76,6 +77,89 @@ const ErrorMessage = styled.div`
   text-align: center;
 `;
 
+// Add new styled components for date picker
+const DatePickerWrapper = styled.div`
+  margin-top: 20px;
+  background-color: rgba(0, 0, 0, 0.3);
+  padding: 15px;
+  border-radius: 8px;
+`;
+
+const DateLabel = styled.h3`
+  margin-top: 0;
+  margin-bottom: 10px;
+  color: var(--jeopardy-value);
+`;
+
+const DateToggle = styled.button`
+  background-color: transparent;
+  border: none;
+  color: var(--jeopardy-value);
+  font-size: 1rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  margin-bottom: 10px;
+  
+  &:hover {
+    color: white;
+  }
+`;
+
+const DateGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 10px;
+  
+  &::-webkit-scrollbar {
+    width: 8px;
+  }
+  
+  &::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+  }
+  
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--jeopardy-value);
+    border-radius: 4px;
+  }
+`;
+
+const DateButton = styled.button`
+  background-color: var(--jeopardy-board);
+  color: var(--jeopardy-value);
+  border: 1px solid var(--jeopardy-value);
+  border-radius: 4px;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  
+  &:hover {
+    background-color: var(--jeopardy-selected);
+  }
+  
+  &.selected {
+    background-color: var(--jeopardy-value);
+    color: var(--jeopardy-board);
+    font-weight: bold;
+  }
+`;
+
+const RandomDateButton = styled(DateButton)`
+  background-color: var(--jeopardy-value);
+  color: var(--jeopardy-board);
+  grid-column: 1 / -1;
+  margin-bottom: 5px;
+  
+  &:hover {
+    background-color: #ffd700;
+  }
+`;
+
 const Home = () => {
   const navigate = useNavigate();
   const [playerName, setPlayerName] = useState('');
@@ -85,6 +169,11 @@ const Home = () => {
   const [error, setError] = useState('');
   const [isMobile, setIsMobile] = useState(false);
   const [debug, setDebug] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [dates, setDates] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [yearRange, setYearRange] = useState({ start: 1984, end: 2024 });
   
   // Detect mobile device
   useEffect(() => {
@@ -104,6 +193,40 @@ const Home = () => {
     }
   }, []);
   
+  // Load available dates when component mounts or when year range changes
+  useEffect(() => {
+    async function fetchDates() {
+      try {
+        // Add year range as query parameters
+        const response = await axios.get('/api/jeopardy/dates', {
+          params: {
+            startYear: yearRange.start,
+            endYear: yearRange.end
+          }
+        });
+        
+        if (response.data.success) {
+          setDates(response.data.dates);
+        }
+      } catch (error) {
+        console.error('Error fetching dates:', error);
+      }
+    }
+    
+    fetchDates();
+  }, [yearRange.start, yearRange.end]); // Re-fetch when year range changes
+  
+  // Add year range handlers
+  const handleYearRangeChange = (type, value) => {
+    const newValue = parseInt(value, 10);
+    if (isNaN(newValue)) return;
+    
+    setYearRange(prev => ({
+      ...prev,
+      [type]: newValue
+    }));
+  };
+  
   // Desktop only - Create game
   const handleCreateGame = async (e) => {
     if (e) e.preventDefault();
@@ -115,54 +238,32 @@ const Home = () => {
       return;
     }
     
+    setLoading(true);
+    
     try {
-      setIsCreatingGame(true);
       localStorage.setItem('playerName', playerName.trim());
       
       setDebug('Sending create game request...');
       
-      // Create direct API call instead of socket to simplify
-      const response = await fetch('/api/games/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({ playerName: playerName.trim() })
+      // Create game with API
+      const response = await axios.post('/api/games/create', {
+        playerName: playerName.trim(),
+        gameDate: selectedDate,
+        yearRange: yearRange // Include the year range
       });
       
-      // Get the response text only once
-      const responseText = await response.text();
-      setDebug(`Response received (${responseText.length} chars): ${responseText.substring(0, 50)}...`);
-      
-      if (!response.ok) {
-        setDebug(`API response not OK: ${response.status} ${response.statusText}`);
-        throw new Error(`Server error: ${response.status} - ${responseText.substring(0, 100)}`);
-      }
-      
-      // Parse the already read text as JSON for successful response
-      try {
-        setDebug('Parsing response...');
-        const data = JSON.parse(responseText);
-        setDebug('Response parsed successfully');
-        
-        if (data.success && data.roomCode) {
-          console.log('Game created successfully:', data);
-          navigate(`/game/host/${data.roomCode}`);
-        } else {
-          console.error('Failed to create game:', data);
-          setError(data.error || 'Failed to create game');
-          setIsCreatingGame(false);
-        }
-      } catch (parseError) {
-        console.error('Error parsing response:', parseError);
-        setError(`Error parsing response: ${parseError.message}`);
-        setIsCreatingGame(false);
+      if (response.data.success) {
+        console.log('Game created successfully:', response.data);
+        navigate(`/game/host/${response.data.roomCode}`);
+      } else {
+        console.error('Failed to create game:', response.data);
+        setError(response.data.message || 'Failed to create game');
       }
     } catch (err) {
       console.error('Error creating game:', err);
-      setError('Error creating game: ' + (err.message || 'Unknown error'));
-      setIsCreatingGame(false);
+      setError('Error creating game: ' + (err.response?.data?.message || 'Unknown error'));
+    } finally {
+      setLoading(false);
     }
   };
   
@@ -192,6 +293,28 @@ const Home = () => {
       setError('Error joining game: ' + (err.message || 'Unknown error'));
       setIsJoiningGame(false);
     }
+  };
+  
+  const toggleDatePicker = () => {
+    setShowDatePicker(!showDatePicker);
+  };
+
+  const handleDateSelect = (date) => {
+    setSelectedDate(date);
+  };
+
+  const handleRandomDate = () => {
+    setSelectedDate(null);
+  };
+
+  // Format date for display
+  const formatDate = (dateString) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
   };
   
   return (
@@ -240,6 +363,34 @@ const Home = () => {
               onChange={(e) => setPlayerName(e.target.value)}
               disabled={isCreatingGame}
             />
+            
+            {/* Year Range Selector */}
+            <div style={{ marginBottom: '15px' }}>
+              <h4 style={{ margin: '5px 0', color: '#DDB72C' }}>Year Range (1984-2024)</h4>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <Input
+                  type="number"
+                  placeholder="Start Year"
+                  min="1984"
+                  max="2024"
+                  value={yearRange.start}
+                  onChange={(e) => handleYearRangeChange('start', e.target.value)}
+                  disabled={isCreatingGame}
+                  style={{ flex: 1 }}
+                />
+                <Input
+                  type="number"
+                  placeholder="End Year"
+                  min="1984"
+                  max="2024"
+                  value={yearRange.end}
+                  onChange={(e) => handleYearRangeChange('end', e.target.value)}
+                  disabled={isCreatingGame}
+                  style={{ flex: 1 }}
+                />
+              </div>
+            </div>
+            
             <Button 
               type="submit" 
               disabled={!playerName.trim() || isCreatingGame}

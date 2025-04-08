@@ -5,9 +5,10 @@
   "main": "server/index.js",
   "scripts": {
     "start": "cd server && npm start",
+    "build:client": "cd client && npm run build",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm start",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "npm run build:client && concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "build": "cd client && npm run build",
     "heroku-postbuild": "NPM_CONFIG_PRODUCTION=false npm install --prefix client && npm run build --prefix client"
   },

@@ -4,9 +4,31 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
+const { v4: uuidv4 } = require('uuid');
+const { stringSimilarity } = require('string-similarity-js');
+const fs = require('fs');
 
-// Load database module
-const { pool, initializeDB } = require('./db');
+// Load in-memory dataset module
+const { 
+  initializeDataset, 
+  inMemoryDataset, 
+  getQuestionsCount, 
+  getCategories, 
+  getQuestionsByCategory,
+  getRandomQuestionsByCategory,
+  getQuestionsByYearRange
+} = require('./db');
+
+// Import the database loader
+const jeopardyDB = require('./utils/databaseLoader');
+
+// Verify dataset requirements
+if (!fs.existsSync(path.join(__dirname, '../data/combined_season1-40.tsv'))) {
+  console.error('FATAL ERROR: combined_season1-40.tsv dataset file not found in data directory');
+  console.error('This file is required for the application to function');
+  console.error('Please download the dataset and place it in the data directory');
+  process.exit(1);
+}
 
 dotenv.config();
 
@@ -22,9 +44,82 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve static files if in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/build')));
+// Function to check answer correctness with permissive matching
+function checkAnswerCorrectness(userAnswer, correctAnswer) {
+  if (!userAnswer || !correctAnswer) return false;
+  
+  // Normalize both answers: lowercase, remove punctuation, extra spaces
+  const normalizeAnswer = (answer) => {
+    return answer.toString()
+      .toLowerCase()
+      .replace(/[^\w\s]/g, '') // Remove punctuation
+      .replace(/\s+/g, ' ')    // Replace multiple spaces with a single space
+      .trim();
+  };
+  
+  const normalizedUserAnswer = normalizeAnswer(userAnswer);
+  const normalizedCorrectAnswer = normalizeAnswer(correctAnswer);
+  
+  // Exact match after normalization
+  if (normalizedUserAnswer === normalizedCorrectAnswer) {
+    console.log('Exact match after normalization');
+    return true;
+  }
+  
+  // Check if correct answer contains the user's answer (useful for partial answers)
+  if (normalizedCorrectAnswer.includes(normalizedUserAnswer) && 
+      normalizedUserAnswer.length > normalizedCorrectAnswer.length * 0.5) {
+    console.log('User answer is substantial part of correct answer');
+    return true;
+  }
+  
+  // Check if answer contains important keywords
+  const correctWords = normalizedCorrectAnswer.split(' ');
+  const userWords = normalizedUserAnswer.split(' ');
+  
+  // If answer is short (1-2 words), check if user got the main word
+  if (correctWords.length <= 2 && userWords.some(word => 
+    correctWords.includes(word) && word.length > 3)) {
+    console.log('User got main word in a short answer');
+    return true;
+  }
+  
+  // For longer answers, count how many significant words match
+  if (correctWords.length > 2) {
+    const significantWords = correctWords.filter(word => word.length > 3);
+    const matchedWords = significantWords.filter(word => userWords.includes(word));
+    if (matchedWords.length >= Math.ceil(significantWords.length * 0.6)) {
+      console.log('User matched significant keywords');
+      return true;
+    }
+  }
+  
+  // Use string similarity algorithm for fuzzy matching
+  const similarity = stringSimilarity(normalizedUserAnswer, normalizedCorrectAnswer);
+  console.log(`String similarity score: ${similarity}`);
+  
+  // Permissive threshold - 0.7 means answers are 70% similar
+  if (similarity >= 0.7) {
+    console.log('Answer is very similar');
+    return true;
+  }
+  
+  // Special case: names may have different formats (e.g., "John Doe" vs "Doe, John")
+  if (correctWords.length === 2 && userWords.length === 2) {
+    // Check if the words are the same but in different order
+    if (correctWords[0] === userWords[1] && correctWords[1] === userWords[0]) {
+      console.log('Name in different format');
+      return true;
+    }
+  }
+  
+  // Special case: if both answers are very short, be more lenient with similarity
+  if (normalizedUserAnswer.length <= 5 && normalizedCorrectAnswer.length <= 5 && similarity >= 0.6) {
+    console.log('Short answer with good similarity');
+    return true;
+  }
+  
+  return false;
 }
 
 // Create HTTP server and socket.io instance
@@ -36,8 +131,95 @@ const io = socketIo(server, {
   }
 });
 
+// Generate a room code
+function generateRoomCode() {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 4; i++) {
+    result += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return result;
+}
+
+// Game state storage
+const gameStates = {};
+
+// Add at the beginning of the file, near the other state variables
 // Game state
-const games = {};
+const GAME_ROUNDS = {
+  SINGLE_JEOPARDY: 'singleJeopardy',
+  DOUBLE_JEOPARDY: 'doubleJeopardy',
+  FINAL_JEOPARDY: 'finalJeopardy',
+  GAME_OVER: 'gameOver'
+};
+
+// Create a new game session
+app.post('/api/games', async (req, res) => {
+  try {
+    const { hostName, yearRange } = req.body;
+    // Generate a unique 4-character room code
+    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+    
+    // Create a new game state
+    gameStates[roomCode] = {
+      roomCode,
+      hostId: null,
+      hostName,
+      players: [],
+      currentState: 'waiting',
+      board: null,
+      categories: [],
+      selectedQuestion: null,
+      round: 1,
+      yearRange,
+      scores: {},
+      activePlayer: null,
+      buzzerEnabled: false,
+      buzzedPlayers: [],
+      dailyDoubleWager: 0,
+      usedQuestions: [],
+      isInMemoryMode: true  // Always use in-memory mode
+    };
+    
+    // Create a randomly selected set of categories and questions for this game
+    await setupGameBoard(roomCode);
+    
+    res.json({
+      roomCode,
+      gameState: gameStates[roomCode]
+    });
+  } catch (error) {
+    console.error('Error creating game:', error);
+    res.status(500).json({ error: 'Failed to create game' });
+  }
+});
+
+// Serve static files if in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/build')));
+} else {
+  // In development, serve the client build folder as static files too
+  // This helps with testing the full application locally
+  app.use(express.static(path.join(__dirname, '../client/build')));
+}
+
+// Add a status endpoint to verify API is working
+app.get('/api/status', (req, res) => {
+  res.json({
+    status: 'online',
+    inMemoryDataset: {
+      loaded: inMemoryDataset.length > 0,
+      questionCount: inMemoryDataset.length,
+      categories: getCategories().length
+    },
+    serverTime: new Date().toISOString()
+  });
+});
+
+// Catch-all route to serve React app in production
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
+});
 
 // Socket.io connection handler
 io.on('connection', (socket) => {
@@ -48,7 +230,7 @@ io.on('connection', (socket) => {
     console.log(`User disconnected: ${socket.id}`);
     
     // Find the game where this player is a host
-    const hostedGame = Object.values(games).find(game => 
+    const hostedGame = Object.values(gameStates).find(game => 
       game.hostId === socket.id
     );
     
@@ -59,12 +241,12 @@ io.on('connection', (socket) => {
       io.to(hostedGame.roomCode).emit('hostDisconnected');
       
       // Remove the game
-      delete games[hostedGame.roomCode];
+      delete gameStates[hostedGame.roomCode];
       
       console.log(`Game ${hostedGame.roomCode} removed due to host disconnect`);
     } else {
       // Check if this player was in any games and mark them as disconnected
-      Object.values(games).forEach(game => {
+      Object.values(gameStates).forEach(game => {
         const playerIndex = game.players.findIndex(p => p.id === socket.id);
         
         if (playerIndex !== -1) {
@@ -84,114 +266,133 @@ io.on('connection', (socket) => {
   });
   
   // Handle creating a new game
-  socket.on('createGame', (data) => {
-    try {
-      console.log('createGame event received:', { data, socketId: socket.id });
+  socket.on('createGame', async (data) => {
+    console.log('Create game request received:', data);
+    
+    // Handle both string and object parameters
+    let playerName;
+    let roomCode;
+    let yearRange;
+    
+    if (typeof data === 'string') {
+      playerName = data;
+      console.log('createGame: received string parameter:', playerName);
+    } else if (typeof data === 'object') {
+      if (data.playerName) {
+        playerName = data.playerName;
+        console.log('createGame: received object parameter with playerName:', playerName);
+      }
       
-      // Handle both string and object parameters
-      let playerName;
-      let roomCode;
+      if (data.roomCode) {
+        roomCode = data.roomCode.toUpperCase();
+        console.log('createGame: received roomCode in parameter:', roomCode);
+      }
       
-      if (typeof data === 'string') {
-        playerName = data;
-        console.log('createGame: received string parameter:', playerName);
-      } else if (typeof data === 'object') {
-        if (data.playerName) {
-          playerName = data.playerName;
-          console.log('createGame: received object parameter with playerName:', playerName);
+      if (data.yearRange) {
+        yearRange = data.yearRange;
+        console.log('createGame: received yearRange parameter:', yearRange);
+      }
+    }
+    
+    if (!playerName) {
+      playerName = 'Host';
+      console.log('createGame: using default playerName:', playerName);
+    }
+    
+    if (!yearRange) {
+      yearRange = { start: 1984, end: 2024 };
+      console.log('createGame: using default yearRange:', yearRange);
+    }
+    
+    // Generate a room code if not provided, or check if the provided one exists
+    if (!roomCode) {
+      roomCode = generateRoomCode();
+      console.log(`createGame: generated room code: ${roomCode}`);
+    } else {
+      // If room exists, check if we can take it over
+      if (gameStates[roomCode]) {
+        console.log(`createGame: room ${roomCode} already exists`);
+        
+        // Check if the host is disconnected
+        const game = gameStates[roomCode];
+        const hostSocketId = game.hostId || game.host;
+        
+        // If we have a socket id for the host, check if they're still connected
+        if (hostSocketId) {
+          const hostSocket = io.sockets.sockets.get(hostSocketId);
+          
+          if (hostSocket && hostSocket.connected) {
+            console.log(`createGame: room ${roomCode} already has connected host ${hostSocketId}`);
+            socket.emit('error', { message: `Room ${roomCode} already exists and has a host` });
+            return;
+          }
         }
         
-        if (data.roomCode) {
-          roomCode = data.roomCode.toUpperCase();
-          console.log('createGame: received roomCode in parameter:', roomCode);
-        }
+        console.log(`createGame: taking over room ${roomCode} as new host`);
       }
-      
-      if (!playerName) {
-        playerName = 'Host';
-        console.log('createGame: using default playerName:', playerName);
-      }
-      
-      // Generate a room code if not provided, or check if the provided one exists
-      if (!roomCode) {
-        roomCode = generateRoomCode();
-        console.log(`createGame: generated room code: ${roomCode}`);
-      } else {
-        // If room exists, check if we can take it over
-        if (games[roomCode]) {
-          console.log(`createGame: room ${roomCode} already exists`);
-          
-          // Check if the host is disconnected
-          const game = games[roomCode];
-          const hostSocketId = game.hostId || game.host;
-          
-          // If we have a socket id for the host, check if they're still connected
-          if (hostSocketId) {
-            const hostSocket = io.sockets.sockets.get(hostSocketId);
-            
-            if (hostSocket && hostSocket.connected) {
-              console.log(`createGame: room ${roomCode} already has connected host ${hostSocketId}`);
-              socket.emit('error', { message: `Room ${roomCode} already exists and has a host` });
-              return;
-            }
-          }
-          
-          console.log(`createGame: taking over room ${roomCode} as new host`);
-        }
-      }
-      
-      // Set up the initial game state
-      games[roomCode] = {
+    }
+    
+    // Extract game date if provided
+    const gameDate = typeof data === 'object' && data.gameDate ? data.gameDate : null;
+    
+    // Get a random date from the specified year range
+    const gameDateTime = gameDate || jeopardyDB.getRandomDate(yearRange);
+    
+    // Initialize game with current round
+    const game = {
+      roomCode: roomCode,
+      host: socket.id,
+      hostId: socket.id, // Keep both for backward compatibility  
+      players: [{
+        id: socket.id,
+        name: playerName,
+        score: 0,
+        isHost: true
+      }],
+      state: 'waiting',
+      gameState: 'waiting', // For backward compatibility
+      currentRound: GAME_ROUNDS.SINGLE_JEOPARDY, // Start with Single Jeopardy
+      roundsCompleted: [],
+      selectingPlayer: null,
+      currentQuestion: null,
+      startTime: Date.now(),
+      canBuzzIn: false,
+      earlyBuzzPenalties: {},
+      playerAttempts: {},
+      answeringTimeout: null,
+      questionTimeout: null,
+      gameDate: gameDateTime, // Use provided date, random date from year range, or overall random date
+      yearRange: yearRange, // Store year range for reference
+    };
+    
+    // Store the game
+    gameStates[roomCode] = game;
+    
+    // Join the socket to the room
+    socket.join(roomCode);
+    socket.roomCode = roomCode;
+    socket.playerName = playerName;
+    
+    console.log(`Game created by ${playerName} with room code ${roomCode}`);
+    
+    // Prepare response
+    const response = { 
+      roomCode,
+      hostName: playerName,
+      success: true,
+      game: {
         roomCode,
         hostId: socket.id,
-        host: socket.id, // For backward compatibility
         hostName: playerName,
-        players: [{
-          id: socket.id,
-          name: playerName,
-          score: 0,
-          isHost: true,
-          connected: true
-        }],
-        categories: [],
-        board: {},
         gameState: 'waiting',
-        state: 'waiting', // For backward compatibility
-        buzzedPlayer: null,
-        selectingPlayer: null,
-        currentQuestion: null,
-        startTime: Date.now()
-      };
-      
-      // Join the socket to the room
-      socket.join(roomCode);
-      socket.roomCode = roomCode;
-      socket.playerName = playerName;
-      
-      console.log(`Game created by ${playerName} with room code ${roomCode}`);
-      
-      // Prepare response
-      const response = { 
-        roomCode,
-        hostName: playerName,
-        success: true,
-        game: {
-          roomCode,
-          hostId: socket.id,
-          hostName: playerName,
-          gameState: 'waiting',
-          players: games[roomCode].players
-        }
-      };
-      
-      console.log('Emitting gameCreated event with response:', response);
-      
-      // Send the room code back to the host
-      socket.emit('gameCreated', response);
-    } catch (error) {
-      console.error('Error creating game:', error);
-      socket.emit('error', { message: 'Failed to create game: ' + error.message });
-    }
+        players: gameStates[roomCode].players
+      }
+    };
+    
+    console.log('Emitting gameCreated event with response:', response);
+    
+    // Send the room code back to the host
+    socket.emit('gameCreated', response);
   });
   
   // Handle joining a game
@@ -209,12 +410,12 @@ io.on('connection', (socket) => {
       console.log(`Player ${playerName} attempting to join room ${roomCode}`);
       
       // Check if the game exists
-      if (!games[roomCode]) {
+      if (!gameStates[roomCode]) {
         console.log(`Game with room code ${roomCode} not found`);
         return socket.emit('gameNotFound');
       }
       
-      const game = games[roomCode];
+      const game = gameStates[roomCode];
       
       // Check if game is already in progress and not allowing new players
       if (game.gameState !== 'waiting' && !isPlayerRejoining(game, socket.id, playerName)) {
@@ -323,7 +524,7 @@ io.on('connection', (socket) => {
     // Convert to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     if (!game) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
@@ -352,6 +553,12 @@ io.on('connection', (socket) => {
     const player = game.players[playerIndex];
     const now = Date.now();
     
+    // Check if this player has already attempted this question
+    if (game.playerAttempts[player.id]) {
+      console.log(`Player ${player.name} already attempted this question`);
+      return socket.emit('error', { message: 'You have already attempted this question' });
+    }
+    
     // Check if buzzing is allowed or if this is an early buzz
     if (!game.canBuzzIn) {
       console.log(`Player ${player.name} buzzed in too early`);
@@ -377,10 +584,29 @@ io.on('connection', (socket) => {
     
     console.log(`Player ${player.name} buzzed in for question in room ${roomCode}`);
     
+    // Mark this player as having attempted the question
+    game.playerAttempts[player.id] = true;
+    
     // Set as the buzzed player - store the whole player object
     game.buzzedPlayer = player;
     
-    // Emit event to all players in the room
+    // Clear any existing question timeout since someone buzzed in
+    if (game.questionTimeout) {
+      clearTimeout(game.questionTimeout);
+      game.questionTimeout = null;
+    }
+    
+    // Set a 5-second timeout for the player to answer
+    game.answeringTimeout = setTimeout(() => {
+      if (gameStates[roomCode] && gameStates[roomCode].buzzedPlayer && gameStates[roomCode].buzzedPlayer.id === player.id) {
+        console.log(`Answer timeout for player ${player.name} in room ${roomCode}`);
+        
+        // Automatically process as incorrect answer
+        handleIncorrectAnswer(roomCode, player);
+      }
+    }, 5000);
+    
+    // Emit events to notify players
     io.to(roomCode).emit('playerBuzzed', {
       player: player,
       playerId: player.id,
@@ -403,32 +629,19 @@ io.on('connection', (socket) => {
   };
   
   // When a host starts the game
-  socket.on('startGame', (roomCodeOrData) => {
-    console.log(`Start game request for room:`, roomCodeOrData);
-    
-    let roomCode;
-    
-    // Handle both function signatures
-    if (typeof roomCodeOrData === 'string') {
-      roomCode = roomCodeOrData;
-    } else if (typeof roomCodeOrData === 'object' && roomCodeOrData.roomCode) {
-      roomCode = roomCodeOrData.roomCode;
-    } else {
-      console.error('Invalid startGame parameters');
-      socket.emit('error', { message: 'Invalid parameters for startGame' });
-      return;
-    }
+  socket.on('startGame', async (roomCode) => {
+    console.log(`Start game request received for room ${roomCode}`);
     
     // Convert to uppercase for consistency
     roomCode = roomCode.toString().toUpperCase();
     
-    if (!games[roomCode]) {
+    if (!gameStates[roomCode]) {
       console.log('Invalid startGame: game not found');
       socket.emit('error', { message: 'Game not found' });
       return;
     }
     
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     
     // Only the host can start the game
     if (socket.id !== game.hostId && socket.id !== game.host) {
@@ -444,53 +657,55 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Get random categories and generate the game board
-    getRandomCategories()
-      .then(categories => {
-        game.categories = categories;
-        
-        return generateBoard(categories);
-      })
-      .then(board => {
-        game.board = board;
-        
-        // Update game state consistently
-        game.state = 'inProgress';
-        game.gameState = 'inProgress'; // For backward compatibility
-        
-        // Select a random player to choose the first question
-        if (game.players.length > 0) {
-          // Filter out the host from player selection
-          const nonHostPlayers = game.players.filter(player => !player.isHost);
-          
-          if (nonHostPlayers.length > 0) {
-            const randomIndex = Math.floor(Math.random() * nonHostPlayers.length);
-            const randomPlayer = nonHostPlayers[randomIndex];
-            game.selectingPlayer = randomPlayer;
-            console.log(`Random player ${randomPlayer.name} selected to choose first question`);
-          } else {
-            console.log('No non-host players available to select first question');
-          }
+    // Load game data from Jeopardy dataset
+    try {
+      // Load full game data for this date
+      const jeopardyGameData = await jeopardyDB.loadGameByDate(game.gameDate);
+      
+      // Store the full game data for later rounds
+      game.jeopardyData = jeopardyGameData;
+      
+      // Set current round data (Single Jeopardy)
+      const currentRoundData = jeopardyGameData.round1;
+      const categories = currentRoundData.categories.slice(0, 6); // Limit to 6 categories
+      
+      // Create the board
+      const board = {};
+      categories.forEach(category => {
+        if (currentRoundData.board[category]) {
+          board[category] = currentRoundData.board[category].slice(0, 5); // Limit to 5 questions per category
         }
-        
-        // Emit to all players
-        io.to(roomCode).emit('gameStarted', {
-          game: {
-            ...game,
-            players: game.players.filter(p => !p.isHost) // Filter out host from player list
-          },
-          gameState: game.state,
-          categories: game.categories,
-          board: game.board,
-          selectingPlayerId: game.selectingPlayer ? game.selectingPlayer.id : null
-        });
-        
-        console.log(`Game ${roomCode} started with ${game.players.filter(p => !p.isHost).length} players and ${game.categories.length} categories`);
-      })
-      .catch(error => {
-        console.error('Error starting game:', error);
-        socket.emit('error', { message: 'Failed to start game' });
       });
+      
+      // Set the game properties
+      game.categories = categories;
+      game.board = board;
+      game.state = 'inProgress';
+      game.gameState = 'inProgress'; // For backward compatibility
+      
+      // Pick a random player to start
+      const nonHostPlayers = game.players.filter(p => !p.isHost);
+      if (nonHostPlayers.length > 0) {
+        const randomIndex = Math.floor(Math.random() * nonHostPlayers.length);
+        game.selectingPlayer = nonHostPlayers[randomIndex];
+      }
+      
+      // Notify all players that the game has started
+      io.to(roomCode).emit('gameStarted', {
+        game: {
+          ...game,
+          players: game.players.filter(p => !p.isHost) // Filter out host from player list
+        },
+        categories,
+        board,
+        selectingPlayerId: game.selectingPlayer?.id
+      });
+      
+      console.log(`Game in room ${roomCode} started with ${categories.length} categories`);
+    } catch (error) {
+      console.error(`Error starting game in room ${roomCode}:`, error);
+      socket.emit('error', { message: `Failed to start game: ${error.message}` });
+    }
   });
   
   // When a question is selected
@@ -526,14 +741,14 @@ io.on('connection', (socket) => {
     // Convert to uppercase for consistency
     roomCode = roomCode.toString().toUpperCase();
     
-    if (!games[roomCode]) {
+    if (!gameStates[roomCode]) {
       console.log('Invalid selectQuestion: game not found');
       socket.emit('error', { message: 'Game not found' });
       return;
     }
     
     // Get game and check state
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     
     // Check if game is in progress (using either state field)
     if (game.state !== 'inProgress' && game.gameState !== 'inProgress') {
@@ -579,15 +794,31 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Check if question is already revealed
+    // Check if question is already revealed - add more detailed logging
     if (board[category][valueIndex].revealed) {
-      console.log('Question already revealed');
+      console.log(`Question at category ${category} (${categoryIndex}), value ${valueIndex} already revealed`);
+      console.log(`Board state for this question:`, board[category][valueIndex]);
       socket.emit('error', { message: 'Question already revealed' });
       return;
     }
     
     // Get question details
     const question = board[category][valueIndex];
+    
+    // Reset player attempts for the new question
+    game.playerAttempts = {};
+    game.canBuzzIn = false;
+    game.buzzedPlayer = null;
+    
+    // Clear any existing timeouts
+    if (game.answeringTimeout) {
+      clearTimeout(game.answeringTimeout);
+      game.answeringTimeout = null;
+    }
+    if (game.questionTimeout) {
+      clearTimeout(game.questionTimeout);
+      game.questionTimeout = null;
+    }
     
     // Set current question
     game.currentQuestion = {
@@ -602,9 +833,6 @@ io.on('connection', (socket) => {
     // Update game state
     game.state = 'questionActive';
     game.gameState = 'questionActive'; // For backward compatibility
-    game.buzzedPlayer = null;
-    game.canBuzzIn = false; // Initially buzzing is not allowed
-    game.earlyBuzzPenalties = {}; // Track players who buzzed in early
     
     // Log who selected the question
     const player = game.players.find(p => p.id === socket.id);
@@ -621,11 +849,11 @@ io.on('connection', (socket) => {
     
     // After a delay (matches host's time to read), enable buzzing
     setTimeout(() => {
-      if (games[roomCode] && games[roomCode].currentQuestion) {
-        games[roomCode].canBuzzIn = true;
+      if (gameStates[roomCode] && gameStates[roomCode].currentQuestion) {
+        gameStates[roomCode].canBuzzIn = true;
         io.to(roomCode).emit('buzzerEnabled', {
           roomCode,
-          questionId: games[roomCode].currentQuestion.text
+          questionId: gameStates[roomCode].currentQuestion.text
         });
         console.log(`Buzzer enabled for room ${roomCode}`);
       }
@@ -649,12 +877,12 @@ io.on('connection', (socket) => {
       console.log(`Player ${playerName} attempting to rejoin room ${roomCode}`);
       
       // Check if the game exists
-      if (!games[roomCode]) {
+      if (!gameStates[roomCode]) {
         console.log(`Game with room code ${roomCode} not found`);
         return socket.emit('gameNotFound');
       }
       
-      const game = games[roomCode];
+      const game = gameStates[roomCode];
       
       // Look for the player in the game
       const playerIndex = game.players.findIndex(p => 
@@ -737,7 +965,7 @@ io.on('connection', (socket) => {
     // Convert room code to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     if (!game) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
@@ -815,53 +1043,45 @@ io.on('connection', (socket) => {
       // Set this player as the selecting player for the next question
       game.selectingPlayer = game.players[playerIndex];
       console.log(`${playerToUse.name} will select the next question`);
-    } else {
-      console.log(`Answer is incorrect! Subtracting ${questionValue} from ${playerToUse.name}'s score`);
-      game.players[playerIndex].score -= questionValue;
-    }
-    
-    // Emit the answer judged event to all players in the room
-    io.to(roomCode).emit('answerJudged', {
-      playerId: playerToUse.id,
-      playerName: playerToUse.name,
-      answer: answerToUse,
-      correct: isCorrectToUse,
-      score: game.players[playerIndex].score,
-      selectingPlayerId: isCorrectToUse ? playerToUse.id : null
-    });
-    
-    // If the answer is correct, schedule a return to the board after 3 seconds
-    if (isCorrectToUse) {
+      
+      // Clear the answering timeout
+      if (game.answeringTimeout) {
+        clearTimeout(game.answeringTimeout);
+        game.answeringTimeout = null;
+      }
+      
+      // Emit the answer judged event to all players in the room
+      io.to(roomCode).emit('answerJudged', {
+        playerId: playerToUse.id,
+        playerName: playerToUse.name,
+        answer: answerToUse,
+        correct: true,
+        score: game.players[playerIndex].score,
+        selectingPlayerId: playerToUse.id
+      });
+      
+      // Mark the question as revealed in the board
+      const question = game.currentQuestion;
+      game.board[question.category][question.valueIndex].revealed = true;
+      
+      // Schedule a return to the board after 3 seconds
       setTimeout(() => {
-        // Mark the question as revealed in the board
-        const question = game.currentQuestion;
-        game.board[question.category][question.valueIndex].revealed = true;
-        
-        // Reset the current question and update game state
-        game.currentQuestion = null;
-        game.buzzedPlayer = null;
-        game.state = 'inProgress';
-        game.gameState = 'inProgress'; // For backward compatibility
-        
-        // Notify all players to return to the board
-        io.to(roomCode).emit('returnToBoard', {
-          game: game,
-          selectingPlayerId: game.selectingPlayer?.id
-        });
-        
-        console.log(`Game ${roomCode} returned to board. ${playerToUse.name} will select the next question.`);
+        returnToBoard(roomCode);
       }, 3000);
+    } else {
+      // Handle incorrect answer (reusing the same function)
+      handleIncorrectAnswer(roomCode, playerToUse);
     }
   });
   
   // Host judges answer
   socket.on('judgeAnswer', ({ roomCode, playerId, isCorrect }) => {
-    if (!games[roomCode] || games[roomCode].hostId !== socket.id || games[roomCode].host !== socket.id) {
+    if (!gameStates[roomCode] || gameStates[roomCode].hostId !== socket.id || gameStates[roomCode].host !== socket.id) {
       return;
     }
     
-    const currentQuestion = games[roomCode].currentQuestion;
-    const player = games[roomCode].players[playerId];
+    const currentQuestion = gameStates[roomCode].currentQuestion;
+    const player = gameStates[roomCode].players[playerId];
     
     if (!currentQuestion || !player) {
       return;
@@ -871,15 +1091,15 @@ io.on('connection', (socket) => {
     const pointValue = currentQuestion.value;
     if (isCorrect) {
       player.score += pointValue;
-      games[roomCode].scores[playerId] += pointValue;
+      gameStates[roomCode].scores[playerId] += pointValue;
     } else {
       player.score -= pointValue;
-      games[roomCode].scores[playerId] -= pointValue;
+      gameStates[roomCode].scores[playerId] -= pointValue;
     }
     
     // Reset current question state
-    games[roomCode].gameState = 'inProgress';
-    games[roomCode].currentQuestion = null;
+    gameStates[roomCode].gameState = 'inProgress';
+    gameStates[roomCode].currentQuestion = null;
     
     // Send updated scores to everyone
     io.to(roomCode).emit('scoreUpdate', {
@@ -894,7 +1114,7 @@ io.on('connection', (socket) => {
   // End game
   socket.on('endGame', ({ roomCode }) => {
     // Check if the user is the host
-    if (games[roomCode] && (socket.id === games[roomCode].hostId || socket.id === games[roomCode].host || true)) { // Allow any player to end for debugging
+    if (gameStates[roomCode] && (socket.id === gameStates[roomCode].hostId || socket.id === gameStates[roomCode].host || true)) { // Allow any player to end for debugging
       endGame(roomCode);
     }
   });
@@ -911,7 +1131,7 @@ io.on('connection', (socket) => {
     // Convert to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     if (!game) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
@@ -926,10 +1146,46 @@ io.on('connection', (socket) => {
     // Set buzzing to be allowed
     game.canBuzzIn = true;
     
+    // Clear any existing timeout
+    if (game.questionTimeout) {
+      clearTimeout(game.questionTimeout);
+    }
+    
+    // Set a 5-second timeout for the question - EXACT 5000ms
+    game.questionTimeout = setTimeout(() => {
+      // Only handle timeout if no one has buzzed in
+      if (!game.buzzedPlayer && gameStates[roomCode]) {
+        console.log(`Question timeout for room ${roomCode} - no one buzzed in`);
+        
+        // Disable buzzing
+        game.canBuzzIn = false;
+        
+        // Mark the question as revealed in the board
+        if (game.currentQuestion) {
+          const question = game.currentQuestion;
+          if (game.board[question.category] && game.board[question.category][question.valueIndex]) {
+            game.board[question.category][question.valueIndex].revealed = true;
+          }
+        }
+        
+        // Emit timeout event
+        io.to(roomCode).emit('timeExpired', {
+          question: game.currentQuestion,
+          answer: game.currentQuestion.answer
+        });
+        
+        // After 3 seconds, return to the board with the last correct player as the selecting player
+        setTimeout(() => {
+          returnToBoard(roomCode);
+        }, 3000);
+      }
+    }, 5000);
+    
     // Emit event to all players in the room
     io.to(roomCode).emit('buzzerEnabled', {
       roomCode,
-      questionId: game.currentQuestion?.text
+      questionId: game.currentQuestion?.text,
+      timeStamp: Date.now() // Send the exact timestamp when buzzing was enabled
     });
     
     console.log(`Buzzer enabled for room ${roomCode}`);
@@ -947,26 +1203,20 @@ io.on('connection', (socket) => {
     // Convert to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     if (!game) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
     }
     
-    // Check if this is the host
-    if (socket.id !== game.hostId && socket.id !== game.host) {
-      console.error(`Only the host can signal when time has expired`);
-      return socket.emit('error', { message: 'Only the host can signal when time has expired' });
-    }
-    
-    // Check if there's an active question
-    if (!game.currentQuestion) {
+    // Check if the question is active
+    if (game.state !== 'questionActive' || !game.currentQuestion) {
       console.error(`No active question for room ${roomCode}`);
       return socket.emit('error', { message: 'No active question' });
     }
     
-    // Disable buzzing
-    game.canBuzzIn = false;
+    // Log the expired question
+    console.log(`Time expired for question in room ${roomCode}, no points awarded`);
     
     // Mark the question as revealed in the board
     const question = game.currentQuestion;
@@ -974,12 +1224,16 @@ io.on('connection', (socket) => {
       game.board[question.category][question.valueIndex].revealed = true;
     }
     
-    // Emit to all players that time expired
+    // Emit the correct answer to all players
     io.to(roomCode).emit('timeExpired', {
-      question: game.currentQuestion
+      question: game.currentQuestion,
+      answer: game.currentQuestion.answer
     });
     
-    console.log(`Time expired for question in room ${roomCode}, no points awarded`);
+    // After 3 seconds, return to the board
+    setTimeout(() => {
+      returnToBoard(roomCode);
+    }, 3000);
   });
   
   // Handle returning to the board (either after answer or timeout)
@@ -994,493 +1248,751 @@ io.on('connection', (socket) => {
     // Convert to uppercase for consistency
     const roomCode = data.roomCode.toString().toUpperCase();
     
-    const game = games[roomCode];
+    const game = gameStates[roomCode];
     if (!game) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
     }
     
-    // Reset the game state for next question
-    game.currentQuestion = null;
-    game.buzzedPlayer = null;
-    game.state = 'inProgress';
-    game.gameState = 'inProgress'; // For backward compatibility
-    
-    // Check for selecting player in data
+    // Check for selecting player in data and set it if provided
     if (data.selectingPlayerId) {
       const selectingPlayer = game.players.find(p => p.id === data.selectingPlayerId);
       if (selectingPlayer) {
         game.selectingPlayer = selectingPlayer;
-        console.log(`${selectingPlayer.name} will select the next question`);
+        console.log(`Setting selecting player to ${selectingPlayer.name} from socket request`);
+      }
+    }
+    
+    // Call the helper function to handle the rest
+    returnToBoard(roomCode);
+  });
+
+  // Function to handle incorrect answers
+  function handleIncorrectAnswer(roomCode, player) {
+    const game = gameStates[roomCode];
+    if (!game || !game.currentQuestion) return;
+    
+    console.log(`Incorrect answer from ${player.name} in room ${roomCode}`);
+    
+    // Subtract the question value from the player's score
+    const questionValue = game.currentQuestion.value;
+    const playerIndex = game.players.findIndex(p => p.id === player.id);
+    
+    if (playerIndex !== -1) {
+      game.players[playerIndex].score -= questionValue;
+      console.log(`Subtracting ${questionValue} from ${player.name}'s score`);
+    }
+    
+    // Clear the answering timeout
+    if (game.answeringTimeout) {
+      clearTimeout(game.answeringTimeout);
+      game.answeringTimeout = null;
+    }
+    
+    // Emit the answer judged event to all players in the room
+    io.to(roomCode).emit('answerJudged', {
+      playerId: player.id,
+      playerName: player.name,
+      answer: player.answer || "No answer given",
+      correct: false,
+      score: game.players[playerIndex].score
+    });
+    
+    // Reset the buzzed player to allow others to buzz in
+    game.buzzedPlayer = null;
+    
+    // Re-enable buzzing if there are players who haven't attempted this question
+    const playersWhoCanBuzz = game.players.filter(p => 
+      !p.isHost && !game.playerAttempts[p.id]
+    );
+    
+    if (playersWhoCanBuzz.length > 0) {
+      console.log(`${playersWhoCanBuzz.length} players can still buzz in for this question`);
+      game.canBuzzIn = true;
+      io.to(roomCode).emit('buzzerEnabled', {
+        roomCode,
+        questionId: game.currentQuestion.text,
+        timeStamp: Date.now()
+      });
+      
+      // Set a short timeout for remaining players to buzz in
+      game.questionTimeout = setTimeout(() => {
+        if (gameStates[roomCode] && !gameStates[roomCode].buzzedPlayer) {
+          console.log(`No more buzzes, revealing answer in room ${roomCode}`);
+          
+          // Disable buzzing
+          game.canBuzzIn = false;
+          
+          // Mark the question as revealed in the board
+          const question = game.currentQuestion;
+          game.board[question.category][question.valueIndex].revealed = true;
+          
+          // Show the correct answer to all players
+          io.to(roomCode).emit('timeExpired', {
+            question: game.currentQuestion,
+            answer: game.currentQuestion.answer
+          });
+          
+          // After 3 seconds, return to the board
+          setTimeout(() => {
+            returnToBoard(roomCode);
+          }, 3000);
+        }
+      }, 5000); // 5 seconds for other players to buzz in
+    } else {
+      // If no one else can buzz in, reveal the answer
+      const question = game.currentQuestion;
+      game.board[question.category][question.valueIndex].revealed = true;
+      
+      // Show the correct answer to all players
+      io.to(roomCode).emit('timeExpired', {
+        question: game.currentQuestion,
+        answer: game.currentQuestion.answer
+      });
+      
+      // After 3 seconds, return to the board
+      setTimeout(() => {
+        returnToBoard(roomCode);
+      }, 3000);
+    }
+  }
+
+  // Helper function to return to the board view
+  function returnToBoard(roomCode) {
+    console.log(`Helper function: returning to board for room ${roomCode}`);
+    
+    const game = gameStates[roomCode];
+    if (!game) {
+      console.error(`Game not found for room ${roomCode}`);
+      return;
+    }
+    
+    // Reset the game state for next question
+    game.currentQuestion = null;
+    game.buzzedPlayer = null;
+    game.playerAttempts = {};
+    game.state = 'inProgress';
+    game.gameState = 'inProgress'; // For backward compatibility
+    
+    // Clear any timeouts
+    if (game.answeringTimeout) {
+      clearTimeout(game.answeringTimeout);
+      game.answeringTimeout = null;
+    }
+    if (game.questionTimeout) {
+      clearTimeout(game.questionTimeout);
+      game.questionTimeout = null;
+    }
+    
+    // If no selecting player is set, use the last player who answered correctly
+    // or keep the current one if it exists
+    if (!game.selectingPlayer) {
+      // Find the last player who answered correctly by looking at scores
+      const playersWithPositiveScores = game.players
+        .filter(p => !p.isHost && p.score > 0)
+        .sort((a, b) => b.score - a.score);
+      
+      if (playersWithPositiveScores.length > 0) {
+        game.selectingPlayer = playersWithPositiveScores[0];
+        console.log(`No selecting player, setting to ${game.selectingPlayer.name} based on score`);
+      } else {
+        // If no one has a positive score, pick a random player
+        const nonHostPlayers = game.players.filter(p => !p.isHost);
+        if (nonHostPlayers.length > 0) {
+          const randomIndex = Math.floor(Math.random() * nonHostPlayers.length);
+          game.selectingPlayer = nonHostPlayers[randomIndex];
+          console.log(`No players with positive scores, randomly selected ${game.selectingPlayer.name}`);
+        }
       }
     }
     
     // Notify all players to return to the board
     io.to(roomCode).emit('returnToBoard', {
-      game: game,
+      game: {
+        ...game,
+        players: game.players.filter(p => !p.isHost) // Filter out host from player list
+      },
       board: game.board,
       selectingPlayerId: game.selectingPlayer?.id
     });
     
-    console.log(`Returned to board for room ${roomCode}`);
+    console.log(`Returned to board for room ${roomCode}, selecting player: ${game.selectingPlayer?.name}`);
     
     // Check if the game is complete (all questions revealed)
     checkGameCompletion(roomCode);
-  });
-});
-
-// Helper functions
-const generateRoomCode = () => {
-  const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  
-  for (let i = 0; i < 4; i++) {
-    code += characters.charAt(Math.floor(Math.random() * characters.length));
   }
-  
-  // Ensure no duplicate room codes
-  return games[code] ? generateRoomCode() : code;
-};
 
-// Mock data for when database is not available
-const mockCategories = [
-  'History', 'Science', 'Geography', 'Entertainment', 'Sports', 'Literature'
-];
-
-const mockQuestions = {
-  'History': [
-    { question: 'Who was the first U.S. President?', answer: 'George Washington' },
-    { question: 'In what year did World War II end?', answer: '1945' },
-    { question: 'Who wrote the Declaration of Independence?', answer: 'Thomas Jefferson' },
-    { question: 'What ancient civilization built the pyramids?', answer: 'Egyptians' },
-    { question: 'Who was the first woman to fly solo across the Atlantic?', answer: 'Amelia Earhart' }
-  ],
-  'Science': [
-    { question: 'What is the chemical symbol for gold?', answer: 'Au' },
-    { question: 'What planet is known as the Red Planet?', answer: 'Mars' },
-    { question: 'What is the hardest natural substance on Earth?', answer: 'Diamond' },
-    { question: 'What is the largest organ in the human body?', answer: 'Skin' },
-    { question: 'What gas do plants absorb from the atmosphere?', answer: 'Carbon dioxide' }
-  ],
-  'Geography': [
-    { question: 'What is the capital of Japan?', answer: 'Tokyo' },
-    { question: 'What is the largest country by land area?', answer: 'Russia' },
-    { question: 'What is the longest river in the world?', answer: 'Nile' },
-    { question: 'What is the largest ocean on Earth?', answer: 'Pacific Ocean' },
-    { question: 'What country is known as the Land of a Thousand Lakes?', answer: 'Finland' }
-  ],
-  'Entertainment': [
-    { question: 'Who played Iron Man in the Marvel Cinematic Universe?', answer: 'Robert Downey Jr.' },
-    { question: 'What is the highest-grossing film of all time?', answer: 'Avatar' },
-    { question: 'Who is the lead singer of the band U2?', answer: 'Bono' },
-    { question: 'What was the first feature-length animated movie?', answer: 'Snow White and the Seven Dwarfs' },
-    { question: 'Which artist painted the Mona Lisa?', answer: 'Leonardo da Vinci' }
-  ],
-  'Sports': [
-    { question: 'What country won the FIFA World Cup in 2018?', answer: 'France' },
-    { question: 'How many players are on a standard soccer team?', answer: '11' },
-    { question: 'Who has won the most Grand Slam tennis tournaments?', answer: 'Novak Djokovic' },
-    { question: 'In what sport would you perform a slam dunk?', answer: 'Basketball' },
-    { question: 'How many rings are on the Olympic flag?', answer: '5' }
-  ],
-  'Literature': [
-    { question: 'Who wrote "Romeo and Juliet"?', answer: 'William Shakespeare' },
-    { question: 'What is the first book in the Harry Potter series?', answer: 'Harry Potter and the Philosopher\'s Stone' },
-    { question: 'Who wrote "To Kill a Mockingbird"?', answer: 'Harper Lee' },
-    { question: 'What is the name of the lion in "The Chronicles of Narnia"?', answer: 'Aslan' },
-    { question: 'Who created Sherlock Holmes?', answer: 'Arthur Conan Doyle' }
-  ]
-};
-
-const getRandomCategories = async () => {
-  try {
-    const result = await pool.query(
-      'SELECT DISTINCT category FROM questions ORDER BY random() LIMIT 6'
-    );
-    return result.rows.map(row => row.category);
-  } catch (error) {
-    console.error('Error fetching random categories:', error);
-    console.log('Using mock categories instead...');
-    return mockCategories;
-  }
-};
-
-const generateBoard = async (categories) => {
-  const board = {};
-  const questionValues = [200, 400, 600, 800, 1000];
-  
-  try {
-    for (const category of categories) {
-      board[category] = [];
+  // Add API endpoint to get available dates
+  app.get('/api/jeopardy/dates', async (req, res) => {
+    try {
+      // Extract year range from query parameters if provided
+      const startYear = req.query.startYear ? parseInt(req.query.startYear) : null;
+      const endYear = req.query.endYear ? parseInt(req.query.endYear) : null;
       
-      try {
-        const result = await pool.query(
-          'SELECT * FROM questions WHERE category = $1 ORDER BY random() LIMIT 5',
-          [category]
-        );
-        
-        // Map questions to value slots
-        result.rows.forEach((row, index) => {
-          board[category].push({
-            text: row.answer, // In Jeopardy, "answer" is the clue shown to contestants
-            answer: row.question, // "question" is what contestants must respond with
-            value: questionValues[index],
-            revealed: false
-          });
-        });
-      } catch (error) {
-        console.error(`Error fetching questions for ${category}, using mock data instead:`, error);
-        
-        // Use mock data for this category
-        if (mockQuestions[category]) {
-          mockQuestions[category].forEach((q, index) => {
-            board[category].push({
-              text: q.question,
-              answer: q.answer,
-              value: questionValues[index],
-              revealed: false
-            });
-          });
-        } else {
-          // If we don't have mock data for this specific category, generate generic questions
-          for (let i = 0; i < 5; i++) {
-            board[category].push({
-              text: `${category} question for $${questionValues[i]}`,
-              answer: `Answer to ${category} for $${questionValues[i]}`,
-              value: questionValues[i],
-              revealed: false
-            });
-          }
-        }
-      }
-    }
-    
-    return board;
-  } catch (error) {
-    console.error('Error generating board:', error);
-    
-    // Fallback to completely mock board
-    const mockBoard = {};
-    for (const category of categories) {
-      mockBoard[category] = [];
+      let dates;
       
-      if (mockQuestions[category]) {
-        mockQuestions[category].forEach((q, index) => {
-          mockBoard[category].push({
-            text: q.question,
-            answer: q.answer,
-            value: questionValues[index],
-            revealed: false
-          });
-        });
+      // If year range is provided, use it to filter dates
+      if (startYear && endYear) {
+        console.log(`Fetching dates between years ${startYear} and ${endYear}`);
+        dates = await jeopardyDB.getDatesByYearRange(startYear, endYear);
       } else {
-        for (let i = 0; i < 5; i++) {
-          mockBoard[category].push({
-            text: `${category} question for $${questionValues[i]}`,
-            answer: `Answer to ${category} for $${questionValues[i]}`,
-            value: questionValues[i],
-            revealed: false
-          });
-        }
+        dates = await jeopardyDB.getAvailableDates();
       }
+      
+      // Take a random sample for display (or all dates if less than 100)
+      const randomSample = dates.length > 100 
+        ? dates.sort(() => 0.5 - Math.random()).slice(0, 100) // Get 100 random dates
+        : dates;
+      
+      res.json({
+        success: true,
+        dates: randomSample,
+        total: dates.length
+      });
+    } catch (error) {
+      console.error('Error getting Jeopardy dates:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get Jeopardy dates',
+        error: error.message
+      });
+    }
+  });
+
+  // Add endpoint to get a specific date's game
+  app.get('/api/jeopardy/game/:date', async (req, res) => {
+    try {
+      const { date } = req.params;
+      const game = await jeopardyDB.loadGameByDate(date);
+      
+      res.json({
+        success: true,
+        game
+      });
+    } catch (error) {
+      console.error(`Error getting Jeopardy game for date ${req.params.date}:`, error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get Jeopardy game',
+        error: error.message
+      });
+    }
+  });
+
+  // Add a function to advance to the next round
+  function advanceToNextRound(roomCode) {
+    const game = gameStates[roomCode];
+    if (!game) return false;
+    
+    // Determine next round
+    let nextRound = null;
+    switch (game.currentRound) {
+      case GAME_ROUNDS.SINGLE_JEOPARDY:
+        nextRound = GAME_ROUNDS.DOUBLE_JEOPARDY;
+        game.roundsCompleted.push(GAME_ROUNDS.SINGLE_JEOPARDY);
+        break;
+      case GAME_ROUNDS.DOUBLE_JEOPARDY:
+        nextRound = GAME_ROUNDS.FINAL_JEOPARDY;
+        game.roundsCompleted.push(GAME_ROUNDS.DOUBLE_JEOPARDY);
+        break;
+      case GAME_ROUNDS.FINAL_JEOPARDY:
+        nextRound = GAME_ROUNDS.GAME_OVER;
+        game.roundsCompleted.push(GAME_ROUNDS.FINAL_JEOPARDY);
+        break;
+      default:
+        return false;
     }
     
-    return mockBoard;
+    game.currentRound = nextRound;
+    
+    // Set up the next round
+    switch (nextRound) {
+      case GAME_ROUNDS.DOUBLE_JEOPARDY:
+        setupDoubleJeopardy(roomCode);
+        break;
+      case GAME_ROUNDS.FINAL_JEOPARDY:
+        setupFinalJeopardy(roomCode);
+        break;
+      case GAME_ROUNDS.GAME_OVER:
+        endGame(roomCode);
+        break;
+    }
+    
+    return true;
   }
-};
 
-// API Routes
-app.get('/api/categories', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT DISTINCT category FROM questions ORDER BY category'
-    );
-    res.json(result.rows);
-  } catch (error) {
-    console.error('Error fetching categories:', error);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
-// API endpoint to create a game (for direct testing)
-app.post('/api/games/create', (req, res) => {
-  try {
-    console.log('REST API: Create game request received', {
-      contentType: req.headers['content-type'],
-      body: req.body,
-      method: req.method,
-      url: req.url
+  // Setup for Double Jeopardy round
+  function setupDoubleJeopardy(roomCode) {
+    const game = gameStates[roomCode];
+    if (!game || !game.jeopardyData || !game.jeopardyData.round2) return false;
+    
+    // Get Double Jeopardy data
+    const doubleJeopardyData = game.jeopardyData.round2;
+    const categories = doubleJeopardyData.categories.slice(0, 6); // Limit to 6 categories
+    
+    // Create the board
+    const board = {};
+    categories.forEach(category => {
+      if (doubleJeopardyData.board[category]) {
+        // In Double Jeopardy, values are doubled
+        board[category] = doubleJeopardyData.board[category].slice(0, 5).map(q => ({
+          ...q,
+          value: q.value * 2, // Double the values
+          revealed: false
+        }));
+      }
     });
     
-    // Validate that we have a body and it's properly parsed
-    if (!req.body) {
-      console.error('REST API: Missing request body');
-      return res.status(400).json({
-        success: false,
-        error: 'Missing request body'
+    // Update game
+    game.categories = categories;
+    game.board = board;
+    game.currentQuestion = null;
+    game.buzzedPlayer = null;
+    game.state = 'inProgress';
+    game.gameState = 'inProgress';
+    
+    // Start with the player who has the lowest score (if tied, pick random among them)
+    const players = game.players.filter(p => !p.isHost);
+    if (players.length > 0) {
+      // Group by score
+      const scoreGroups = {};
+      players.forEach(p => {
+        if (!scoreGroups[p.score]) scoreGroups[p.score] = [];
+        scoreGroups[p.score].push(p);
       });
+      
+      // Get the lowest score
+      const scores = Object.keys(scoreGroups).map(Number).sort((a, b) => a - b);
+      const lowestScore = scores[0];
+      const lowestScorePlayers = scoreGroups[lowestScore];
+      
+      // Pick random player from lowest score group
+      const randomIndex = Math.floor(Math.random() * lowestScorePlayers.length);
+      game.selectingPlayer = lowestScorePlayers[randomIndex];
     }
     
-    // Validate content-type
-    if (!req.is('application/json')) {
-      console.error('REST API: Content-Type must be application/json, got', req.headers['content-type']);
-      return res.status(400).json({
-        success: false,
-        error: 'Content-Type must be application/json'
-      });
-    }
-    
-    // Validate input
-    const playerName = req.body?.playerName || 'APIHost';
-    
-    // Generate a room code or use existing one if provided
-    const providedRoomCode = req.body?.roomCode?.toUpperCase();
-    let roomCode;
-    
-    if (providedRoomCode) {
-      // Check if room exists and if we can take it over
-      if (games[providedRoomCode]) {
-        console.log(`REST API: Room ${providedRoomCode} already exists, checking if we can take it over`);
-        
-        const game = games[providedRoomCode];
-        const hostId = game.hostId || game.host;
-        
-        // Check if host is still connected
-        if (hostId) {
-          const hostSocket = io.sockets.sockets.get(hostId);
-          if (hostSocket && hostSocket.connected) {
-            return res.status(400).json({
-              success: false,
-              error: `Room ${providedRoomCode} already exists and has a host`
-            });
-          }
-        }
-        
-        // Can take over the room
-        roomCode = providedRoomCode;
-        console.log(`REST API: Taking over room ${roomCode}`);
-      } else {
-        // Room doesn't exist, can use the provided code
-        roomCode = providedRoomCode;
-      }
-    } else {
-      // Generate a new room code
-      roomCode = generateRoomCode();
-    }
-    
-    // Create game state with a unique host ID
-    const hostId = 'api-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
-    
-    games[roomCode] = {
-      roomCode,
-      hostId: hostId,
-      host: hostId, // For backward compatibility
-      hostName: playerName,
-      players: [{
-        id: hostId,
-        name: playerName,
-        score: 0,
-        isHost: true,
-        connected: true
-      }],
-      categories: [],
-      board: {},
-      gameState: 'waiting',
-      state: 'waiting', // For backward compatibility
-      buzzedPlayer: null,
-      selectingPlayer: null,
-      currentQuestion: null,
-      startTime: Date.now()
-    };
-    
-    console.log(`REST API: Game created with room code ${roomCode}`);
-    
-    // Prepare response
-    const response = {
-      success: true, 
-      roomCode,
-      hostUrl: `/game/host/${roomCode}`,
-      playerUrl: `/game/player/${roomCode}`,
+    // Notify all players about the round change
+    io.to(roomCode).emit('roundChanged', {
+      round: GAME_ROUNDS.DOUBLE_JEOPARDY,
       game: {
-        roomCode,
-        hostId,
-        hostName: playerName,
-        players: games[roomCode].players,
-        gameState: 'waiting'
-      }
+        ...game,
+        players: game.players.filter(p => !p.isHost)
+      },
+      categories,
+      board,
+      selectingPlayerId: game.selectingPlayer?.id,
+      message: "Double Jeopardy! All clue values are doubled!"
+    });
+    
+    return true;
+  }
+
+  // Setup for Final Jeopardy round
+  function setupFinalJeopardy(roomCode) {
+    const game = gameStates[roomCode];
+    if (!game || !game.jeopardyData || !game.jeopardyData.finalJeopardy) return false;
+    
+    // Get the Final Jeopardy data
+    const finalJeopardy = game.jeopardyData.finalJeopardy;
+    
+    // Change game state
+    game.currentRound = GAME_ROUNDS.FINAL_JEOPARDY;
+    game.state = 'finalJeopardy';
+    game.gameState = 'finalJeopardy';
+    game.finalJeopardy = {
+      category: finalJeopardy.category,
+      question: finalJeopardy.text,
+      answer: finalJeopardy.answer,
+      wagers: {},
+      answers: {},
+      revealed: false
     };
     
-    // Set proper headers
-    res.setHeader('Content-Type', 'application/json');
+    // Only players with positive scores can participate
+    const eligiblePlayers = game.players.filter(p => !p.isHost && p.score > 0);
+    game.finalJeopardyPlayers = eligiblePlayers.map(p => p.id);
     
-    // Send response
-    res.json(response);
-  } catch (error) {
-    console.error('REST API Error creating game:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// API endpoint to list all active games (for debugging)
-app.get('/api/games', (req, res) => {
-  try {
-    const gamesList = Object.keys(games).map(roomCode => ({
-      roomCode,
-      hostName: games[roomCode].hostName,
-      playerCount: games[roomCode].players?.length || 0,
-      state: games[roomCode].gameState || games[roomCode].state,
-      startTime: games[roomCode].startTime
-    }));
+    // Notify all players about Final Jeopardy
+    io.to(roomCode).emit('finalJeopardy', {
+      category: finalJeopardy.category,
+      eligiblePlayers: game.finalJeopardyPlayers,
+      message: "Final Jeopardy! Only players with positive scores can participate."
+    });
     
-    res.json({
-      success: true,
-      count: gamesList.length,
-      games: gamesList
-    });
-  } catch (error) {
-    console.error('REST API Error listing games:', error);
-    res.status(500).json({ success: false, error: error.message });
+    return true;
   }
-});
 
-// Handle React routing in production
-app.get('*', (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
-    res.sendFile(path.join(__dirname, '../client/build/index.html'));
-  } else {
-    res.status(404).send('Not found');
-  }
-});
-
-const PORT = process.env.PORT || 5000;
-
-// Initialize database before starting the server
-initializeDB()
-  .then(() => {
-    server.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  })
-  .catch(err => {
-    console.error('Failed to initialize database:', err);
-    process.exit(1);
+  // Add event handler for Final Jeopardy wagers
+  socket.on('finalJeopardyWager', (data) => {
+    console.log('Final Jeopardy wager received:', data);
+    
+    // Check if this is a valid request
+    const { roomCode, wager } = data;
+    if (!roomCode || wager === undefined) {
+      return socket.emit('error', { message: 'Room code and wager are required' });
+    }
+    
+    // Validate room and player
+    const game = gameStates[roomCode];
+    if (!game) {
+      return socket.emit('error', { message: 'Game not found' });
+    }
+    
+    if (!game.finalJeopardyPlayers || !game.finalJeopardyPlayers.includes(socket.id)) {
+      return socket.emit('error', { message: 'You are not eligible for Final Jeopardy' });
+    }
+    
+    const playerIndex = game.players.findIndex(p => p.id === socket.id);
+    if (playerIndex === -1) {
+      return socket.emit('error', { message: 'Player not found in game' });
+    }
+    
+    // Validate wager amount (0 to player's current score)
+    const player = game.players[playerIndex];
+    const wagerAmount = parseInt(wager);
+    if (isNaN(wagerAmount) || wagerAmount < 0 || wagerAmount > player.score) {
+      return socket.emit('error', { message: `Wager must be between 0 and ${player.score}` });
+    }
+    
+    // Record the wager
+    game.finalJeopardy.wagers[socket.id] = wagerAmount;
+    
+    // Check if all players have wagered
+    const allWagered = game.finalJeopardyPlayers.every(id => game.finalJeopardy.wagers[id] !== undefined);
+    
+    if (allWagered) {
+      // Proceed to showing the question
+      io.to(roomCode).emit('finalJeopardyQuestion', {
+        question: game.finalJeopardy.question
+      });
+    } else {
+      // Notify about this player's wager
+      socket.emit('wagerReceived', { message: `Your wager of $${wagerAmount} has been received.` });
+      
+      // Notify the host about the wager
+      io.to(game.hostId).emit('playerWagered', {
+        playerId: socket.id,
+        playerName: player.name
+      });
+    }
   });
 
-// Helper function to check answer correctness with some flexibility
-function checkAnswerCorrectness(playerAnswer, correctAnswer) {
-  // Exact match
-  if (playerAnswer === correctAnswer) return true;
-  
-  // Check if player answer contains correct answer
-  if (correctAnswer.length > 5 && playerAnswer.includes(correctAnswer)) return true;
-  
-  // Check if correct answer contains player answer (if player answer is substantial)
-  if (playerAnswer.length > 5 && correctAnswer.includes(playerAnswer)) return true;
-  
-  // Levenshtein distance for similar answers
-  if (playerAnswer.length > 3 && correctAnswer.length > 3) {
-    const distance = levenshteinDistance(playerAnswer, correctAnswer);
-    const maxLength = Math.max(playerAnswer.length, correctAnswer.length);
-    // Allow some difference based on the length of the answer
-    if (distance <= Math.min(3, Math.floor(maxLength / 3))) return true;
-  }
-  
-  return false;
-}
+  // Add event handler for Final Jeopardy answers
+  socket.on('finalJeopardyAnswer', (data) => {
+    console.log('Final Jeopardy answer received:', data);
+    
+    // Check if this is a valid request
+    const { roomCode, answer } = data;
+    if (!roomCode || !answer) {
+      return socket.emit('error', { message: 'Room code and answer are required' });
+    }
+    
+    // Validate room and player
+    const game = gameStates[roomCode];
+    if (!game) {
+      return socket.emit('error', { message: 'Game not found' });
+    }
+    
+    if (!game.finalJeopardyPlayers || !game.finalJeopardyPlayers.includes(socket.id)) {
+      return socket.emit('error', { message: 'You are not eligible for Final Jeopardy' });
+    }
+    
+    const playerIndex = game.players.findIndex(p => p.id === socket.id);
+    if (playerIndex === -1) {
+      return socket.emit('error', { message: 'Player not found in game' });
+    }
+    
+    // Record the answer
+    game.finalJeopardy.answers[socket.id] = answer;
+    
+    // Check if all players have answered
+    const allAnswered = game.finalJeopardyPlayers.every(id => game.finalJeopardy.answers[id] !== undefined);
+    
+    if (allAnswered) {
+      // Notify the host that all answers are in
+      io.to(game.hostId).emit('allFinalAnswersReceived');
+    } else {
+      // Notify about this player's answer
+      socket.emit('answerReceived', { message: `Your answer has been received.` });
+      
+      // Notify the host about the answer
+      io.to(game.hostId).emit('playerAnswered', {
+        playerId: socket.id,
+        playerName: game.players[playerIndex].name
+      });
+    }
+  });
 
-// Levenshtein distance calculation for fuzzy matching
-function levenshteinDistance(a, b) {
-  const matrix = [];
-  
-  // Initialize matrix
-  for (let i = 0; i <= b.length; i++) {
-    matrix[i] = [i];
-  }
-  
-  for (let j = 0; j <= a.length; j++) {
-    matrix[0][j] = j;
-  }
-  
-  // Fill in the rest of the matrix
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1, // substitution
-          matrix[i][j - 1] + 1,     // insertion
-          matrix[i - 1][j] + 1      // deletion
-        );
+  // Add event handler for judging Final Jeopardy answers
+  socket.on('judgeFinalAnswer', (data) => {
+    console.log('Judging Final Jeopardy answer:', data);
+    
+    // Check if this is a valid request
+    const { roomCode, playerId, correct } = data;
+    if (!roomCode || !playerId || correct === undefined) {
+      return socket.emit('error', { message: 'Room code, player ID, and judgment are required' });
+    }
+    
+    // Validate room and judge
+    const game = gameStates[roomCode];
+    if (!game) {
+      return socket.emit('error', { message: 'Game not found' });
+    }
+    
+    if (socket.id !== game.hostId && socket.id !== game.host) {
+      return socket.emit('error', { message: 'Only the host can judge answers' });
+    }
+    
+    const playerIndex = game.players.findIndex(p => p.id === playerId);
+    if (playerIndex === -1) {
+      return socket.emit('error', { message: 'Player not found in game' });
+    }
+    
+    // Update player's score based on wager
+    const player = game.players[playerIndex];
+    const wager = game.finalJeopardy.wagers[playerId] || 0;
+    
+    if (correct) {
+      player.score += wager;
+    } else {
+      player.score -= wager;
+    }
+    
+    // Track which players have been judged
+    if (!game.finalJeopardy.judged) {
+      game.finalJeopardy.judged = [];
+    }
+    game.finalJeopardy.judged.push(playerId);
+    
+    // Notify all players about the judgment
+    io.to(roomCode).emit('finalAnswerJudged', {
+      playerId,
+      playerName: player.name,
+      correct,
+      wager,
+      score: player.score,
+      answer: game.finalJeopardy.answers[playerId]
+    });
+    
+    // Check if all answers have been judged
+    const allJudged = game.finalJeopardyPlayers.every(id => game.finalJeopardy.judged.includes(id));
+    
+    if (allJudged) {
+      // Reveal the correct answer if not already revealed
+      if (!game.finalJeopardy.revealed) {
+        game.finalJeopardy.revealed = true;
+        io.to(roomCode).emit('finalAnswerRevealed', {
+          answer: game.finalJeopardy.answer
+        });
+      }
+      
+      // End the game after 5 seconds
+      setTimeout(() => {
+        endGame(roomCode);
+      }, 5000);
+    }
+  });
+
+  // Add function to check if all questions in the board are revealed
+  function areAllQuestionsRevealed(board) {
+    for (const category in board) {
+      for (const question of board[category]) {
+        if (!question.revealed) {
+          return false;
+        }
       }
     }
+    return true;
   }
-  
-  return matrix[b.length][a.length];
-}
 
-// Check if all questions have been answered
-function checkGameCompletion(roomCode) {
-  const game = games[roomCode];
-  if (!game) return;
-  
-  let allRevealed = true;
-  
-  // Check if all questions have been revealed
-  Object.keys(game.board).forEach(category => {
-    game.board[category].forEach(question => {
-      if (!question.revealed) {
-        allRevealed = false;
-      }
+  // Update the checkGameCompletion function to handle multiple rounds
+  function checkGameCompletion(roomCode) {
+    const game = gameStates[roomCode];
+    if (!game) return;
+    
+    // Check if all questions in the current board are revealed
+    if (areAllQuestionsRevealed(game.board)) {
+      console.log(`All questions revealed in room ${roomCode} for round ${game.currentRound}`);
+      
+      // Advance to the next round
+      advanceToNextRound(roomCode);
+    }
+  }
+
+  // Add specific end game function
+  function endGame(roomCode) {
+    const game = gameStates[roomCode];
+    if (!game) return;
+    
+    game.currentRound = GAME_ROUNDS.GAME_OVER;
+    game.state = 'gameOver';
+    game.gameState = 'gameOver';
+    
+    // Sort players by score
+    const sortedPlayers = [...game.players]
+      .filter(p => !p.isHost)
+      .sort((a, b) => b.score - a.score);
+    
+    // Determine winner
+    const winner = sortedPlayers.length > 0 ? sortedPlayers[0] : null;
+    
+    // Notify all players about the game ending
+    io.to(roomCode).emit('gameOver', {
+      players: sortedPlayers,
+      winner: winner ? {
+        id: winner.id,
+        name: winner.name,
+        score: winner.score
+      } : null
     });
-  });
-  
-  // If all questions are revealed, end the game
-  if (allRevealed) {
-    console.log(`All questions revealed for game ${roomCode}. Ending game.`);
-    endGame(roomCode);
+    
+    // Keep game state for a while, then clean up
+    setTimeout(() => {
+      if (gameStates[roomCode]) {
+        console.log(`Cleaning up game ${roomCode}`);
+        delete gameStates[roomCode];
+      }
+    }, 60 * 60 * 1000); // 1 hour
   }
-}
 
-// Function to end a game and calculate final results
-function endGame(roomCode) {
-  const game = games[roomCode];
-  if (!game) return;
-  
-  // Sort players by score
-  const sortedPlayers = [...game.players].sort((a, b) => b.score - a.score);
-  
-  // Add rank to players
-  const rankedPlayers = sortedPlayers.map((player, index) => ({
-    ...player,
-    rank: index + 1
-  }));
-  
-  // Emit game ended event
-  io.to(roomCode).emit('gameEnded', {
-    gameState: 'completed',
-    finalResults: rankedPlayers
-  });
-  
-  // For backward compatibility
-  io.to(roomCode).emit('game-ended', {
-    gameState: 'completed',
-    finalResults: rankedPlayers
-  });
-  
-  // Log completion
-  console.log(`Game ${roomCode} ended. Winner: ${rankedPlayers[0]?.name || 'No players'}`);
-  
-  // Delete the game after a delay
-  setTimeout(() => {
-    console.log(`Cleaning up game ${roomCode}`);
-    delete games[roomCode];
-  }, 60 * 60 * 1000); // Keep game data for 1 hour before cleaning up
-}
+  // Function to set up the game board for a specific game
+  async function setupGameBoard(roomCode) {
+    const gameState = gameStates[roomCode];
+    
+    if (!gameState) {
+      console.error(`Game state not found for room ${roomCode}`);
+      return;
+    }
+    
+    try {
+      // Get all available categories - always use in-memory dataset
+      const allCategories = getCategories();
+      
+      // Optional filtering by year range
+      let filteredCategories = allCategories;
+      if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
+        // Filter in-memory dataset by year range
+        const startYear = parseInt(gameState.yearRange.start);
+        const endYear = parseInt(gameState.yearRange.end);
+        
+        // Get filtered questions by year range
+        const filteredQuestions = getQuestionsByYearRange(startYear, endYear);
+        
+        // Extract unique categories from filtered dataset
+        const uniqueCategories = new Set();
+        filteredQuestions.forEach(q => uniqueCategories.add(q.category));
+        filteredCategories = Array.from(uniqueCategories).map(category => ({ category }));
+      }
+      
+      // Randomly select 6 categories
+      const shuffledCategories = filteredCategories.sort(() => 0.5 - Math.random());
+      const selectedCategories = shuffledCategories.slice(0, 6);
+      
+      // Store selected categories
+      gameState.categories = selectedCategories.map(c => c.category);
+      
+      // Initialize board with empty questions
+      gameState.board = {};
+      
+      // Populate board with questions for each category
+      for (const category of gameState.categories) {
+        // Get questions from in-memory dataset
+        let categoryQuestions = getQuestionsByCategory(category);
+        
+        // Apply year range filter if needed
+        if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
+          const startYear = parseInt(gameState.yearRange.start);
+          const endYear = parseInt(gameState.yearRange.end);
+          
+          categoryQuestions = categoryQuestions.filter(q => {
+            if (!q.air_date) return false;
+            const year = new Date(q.air_date).getFullYear();
+            return year >= startYear && year <= endYear;
+          });
+        }
+        
+        // Filter by round
+        categoryQuestions = categoryQuestions.filter(q => q.round === gameState.round);
+        
+        // Sort by value and select 5 questions (or fewer if not enough available)
+        categoryQuestions.sort((a, b) => a.clue_value - b.clue_value);
+        
+        // If not enough questions, we'll need to adapt
+        gameState.board[category] = [];
+        
+        // Add questions to the board
+        for (let i = 0; i < 5; i++) {
+          const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+          
+          // Find a suitable question with appropriate value
+          const suitableQuestions = categoryQuestions.filter(q => 
+            q.clue_value === value || (q.clue_value === 0 && q.round === gameState.round)
+          );
+          
+          if (suitableQuestions.length > 0) {
+            // Randomly select one question
+            const question = suitableQuestions[Math.floor(Math.random() * suitableQuestions.length)];
+            
+            // Mark one random question as a daily double
+            const isDaily = 
+              (gameState.round === 1 && Math.random() < 0.05 && !gameState.board.dailyDouble) ||
+              (gameState.round === 2 && Math.random() < 0.1 && gameState.board.dailyDoubleCount < 2);
+            
+            if (isDaily) {
+              if (gameState.round === 1) {
+                gameState.board.dailyDouble = `${category}-${value}`;
+              } else {
+                if (!gameState.board.dailyDoubleCount) gameState.board.dailyDoubleCount = 0;
+                gameState.board.dailyDoubleCount++;
+                
+                if (gameState.board.dailyDouble) {
+                  gameState.board.dailyDouble2 = `${category}-${value}`;
+                } else {
+                  gameState.board.dailyDouble = `${category}-${value}`;
+                }
+              }
+            }
+            
+            gameState.board[category].push({
+              id: question.id,
+              value,
+              question: question.answer, // Question is actually the clue shown to players
+              answer: question.question, // Answer is what players must respond with
+              revealed: false,
+              isDaily
+            });
+          } else {
+            // If no suitable question, create an empty slot
+            gameState.board[category].push({
+              id: null,
+              value,
+              question: "No question available",
+              answer: "No answer available",
+              revealed: true, // Mark as revealed so it can't be selected
+              isDaily: false
+            });
+          }
+        }
+      }
+      
+      console.log(`Game board created for room ${roomCode} with categories:`, gameState.categories);
+    } catch (error) {
+      console.error('Error setting up game board:', error);
+      throw error; // Propagate error to caller
+    }
+  }
+});
 
-// Helper function to check if a player is rejoining
-function isPlayerRejoining(game, socketId, playerName) {
-  return game.players.some(p => 
-    p.name.toLowerCase() === playerName.toLowerCase() && !p.connected
-  );
-} 
+// Ensure dataset is loaded at startup
+initializeDataset().then(() => {
+  console.log('Dataset loaded successfully, ready to serve game questions');
+}).catch(err => {
+  console.error('FATAL ERROR: Failed to load dataset:', err);
+  process.exit(1); // Exit if unable to load dataset
+});
+
+// Start the server
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+}); 

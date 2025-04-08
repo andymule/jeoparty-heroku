@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import styled, { keyframes, css } from 'styled-components';
 import io from 'socket.io-client';
+import { loadSound, playSound, cleanupSounds, SOUNDS } from '../utils/soundUtils';
 
 const fadeIn = keyframes`
   from { opacity: 0; transform: translateY(10px); }
@@ -250,6 +251,120 @@ const PlayerItem = styled.div`
   }
 `;
 
+const AnswerTimerBar = styled.div`
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 8px;
+  background-color: ${props => props.$time < 2 ? '#f44336' : '#4CAF50'};
+  width: ${props => (props.$time / 5) * 100}%;
+  transition: width 0.1s linear, background-color 0.3s ease;
+`;
+
+const AnswerReveal = styled.div`
+  margin-top: 20px;
+  padding: 10px;
+  background-color: rgba(0, 0, 0, 0.7);
+  border-radius: 8px;
+  text-align: center;
+`;
+
+const AnswerLabel = styled.div`
+  font-size: 1rem;
+  margin-bottom: 5px;
+  color: #f5cc5d;
+`;
+
+const AnswerText = styled.div`
+  font-size: 1.4rem;
+  font-weight: bold;
+  color: #ffffff;
+`;
+
+// Add styled components for round transitions
+const RoundTransition = styled.div`
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: var(--jeopardy-board);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 20;
+  animation: ${fadeIn} 0.5s ease;
+`;
+
+const RoundTitle = styled.h1`
+  font-size: 3rem;
+  color: var(--jeopardy-value);
+  margin: 0;
+  text-align: center;
+`;
+
+const RoundSubtitle = styled.h2`
+  font-size: 1.5rem;
+  color: white;
+  margin: 10px 0 30px;
+  text-align: center;
+`;
+
+const RoundMessage = styled.p`
+  font-size: 1.2rem;
+  color: white;
+  margin: 0 20px;
+  text-align: center;
+  max-width: 80%;
+`;
+
+// Add components for Final Jeopardy
+const FinalJeopardyContainer = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 20px;
+  text-align: center;
+`;
+
+const FinalCategory = styled.div`
+  font-size: 1.8rem;
+  margin-bottom: 20px;
+  text-transform: uppercase;
+  color: var(--jeopardy-value);
+`;
+
+const FinalQuestion = styled.div`
+  font-size: 1.5rem;
+  margin: 40px 0;
+  animation: ${fadeIn} 0.5s ease;
+`;
+
+const WagerInput = styled.input`
+  padding: 15px;
+  border-radius: 4px;
+  border: 2px solid var(--jeopardy-value);
+  font-size: 1.2rem;
+  width: 100%;
+  margin-bottom: 15px;
+  text-align: center;
+`;
+
+const WagerInfo = styled.div`
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 15px;
+`;
+
+const WagerValue = styled.div`
+  font-size: 1.2rem;
+  color: ${props => props.$error ? '#f44336' : 'white'};
+`;
+
 const GamePlayer = () => {
   const { roomCode } = useParams();
   const navigate = useNavigate();
@@ -272,6 +387,32 @@ const GamePlayer = () => {
   const socketRef = useRef(null);
   const buzzerSound = useRef(null);
   const penaltyTimeoutRef = useRef(null);
+  const [questionTimer, setQuestionTimer] = useState(5);
+  const [answerTimer, setAnswerTimer] = useState(5);
+  const [showTimer, setShowTimer] = useState(false);
+  const questionTimerRef = useRef(null);
+  const answerTimerRef = useRef(null);
+  const correctSound = useRef(null);
+  const incorrectSound = useRef(null);
+  const [showAnswer, setShowAnswer] = useState(false);
+  const [answerText, setAnswerText] = useState('');
+  const [currentRound, setCurrentRound] = useState(null);
+  const [showRoundTransition, setShowRoundTransition] = useState(false);
+  const [roundTransitionMessage, setRoundTransitionMessage] = useState('');
+  const [roundTransitionTitle, setRoundTransitionTitle] = useState('');
+  const roundTransitionTimeoutRef = useRef(null);
+  const [finalJeopardyState, setFinalJeopardyState] = useState({
+    category: '',
+    question: '',
+    wager: 0,
+    answer: '',
+    showQuestion: false,
+    showAnswer: false,
+    wagerSubmitted: false,
+    answerSubmitted: false,
+    canParticipate: false,
+    errorMessage: ''
+  });
 
   useEffect(() => {
     console.log(`GamePlayer initializing for room: ${roomCode}`);
@@ -281,7 +422,10 @@ const GamePlayer = () => {
       setPlayerName(savedName);
     }
     
-    buzzerSound.current = new Audio('/sounds/ba-ding.mp3');
+    // Preload all sounds
+    buzzerSound.current = loadSound('BUZZER');
+    correctSound.current = loadSound('CORRECT');
+    incorrectSound.current = loadSound('INCORRECT');
     
     const newSocket = io(process.env.REACT_APP_SOCKET_URL || window.location.origin);
     socketRef.current = newSocket;
@@ -319,8 +463,19 @@ const GamePlayer = () => {
       
       newSocket.on('error', (data) => {
         console.error('Socket error:', data);
-        setError(data.message || 'An error occurred');
-        setGameState('error');
+        
+        // If this is a "Question already revealed" error, display a more helpful message
+        if (data.message && data.message.includes('Question already revealed')) {
+          setError('That question has already been played. Please select another one.');
+          
+          // Clear the error after 3 seconds
+          setTimeout(() => {
+            setError('');
+          }, 3000);
+        } else {
+          setError(data.message || 'An error occurred');
+          setGameState('error');
+        }
       });
       
       newSocket.on('gameNotFound', () => {
@@ -385,28 +540,85 @@ const GamePlayer = () => {
       newSocket.on('questionSelected', (data) => {
         console.log('Question selected:', data);
         setCurrentQuestion(data.question);
-        setShowBuzzer(true); // Show buzzer immediately
-        setCanBuzz(false); // But don't enable it yet
+        setShowAnswer(false);
+        setAnswerText('');
         setHasBuzzed(false);
         setJudged(null);
         setAnswer('');
         setEarlyBuzzPenalty(false);
-        // Explicitly set gameState to questionActive
-        setGameState('questionActive');
+        setShowBuzzer(true);
+        setCanBuzz(false);
+        
+        // Reset timers completely when new question is selected
+        setQuestionTimer(5);
+        setAnswerTimer(5);
+        setShowTimer(false);
+        
+        // Clear any existing timers
+        if (questionTimerRef.current) {
+          clearInterval(questionTimerRef.current);
+          questionTimerRef.current = null;
+        }
+        if (answerTimerRef.current) {
+          clearInterval(answerTimerRef.current);
+          answerTimerRef.current = null;
+        }
       });
       
-      // Add handler for buzzer enabled event
+      newSocket.on('buzzerReEnabled', (data) => {
+        console.log('Buzzer re-enabled after incorrect answer:', data);
+        if (!hasBuzzed) {
+          setCanBuzz(true);
+          
+          // Play the buzz-in sound
+          playSound('BUZZER').catch(e => console.log('Error playing buzzer sound:', e));
+          
+          // Start the timer
+          startQuestionTimer();
+        }
+      });
+      
       newSocket.on('buzzerEnabled', (data) => {
         console.log('Buzzer enabled:', data);
         setCanBuzz(true);
         
         // Play the buzz-in sound
-        if (buzzerSound.current) {
-          buzzerSound.current.play().catch(e => console.log('Error playing sound:', e));
+        playSound('BUZZER').catch(e => console.log('Error playing buzzer sound:', e));
+        
+        // Start the timer with exact synchronization
+        const serverTimestamp = data.timeStamp || Date.now();
+        const currentTime = Date.now();
+        const timeElapsed = currentTime - serverTimestamp;
+        const remainingTime = Math.max(0, 5000 - timeElapsed) / 1000; // Convert to seconds
+        
+        // Start the timer with the correct remaining time
+        startQuestionTimer(remainingTime);
+      });
+      
+      newSocket.on('allPlayersAttempted', (data) => {
+        console.log('All players have attempted the question:', data);
+        setCanBuzz(false);
+        setAnswerTimer(5);
+        setShowTimer(false);
+        
+        // Clear any existing timers
+        if (questionTimerRef.current) {
+          clearInterval(questionTimerRef.current);
+          questionTimerRef.current = null;
+        }
+        
+        if (answerTimerRef.current) {
+          clearInterval(answerTimerRef.current);
+          answerTimerRef.current = null;
+        }
+        
+        // Show the answer for all clients
+        if (data.answer) {
+          setShowAnswer(true);
+          setAnswerText(data.answer);
         }
       });
       
-      // Add handler for early buzz penalty
       newSocket.on('earlyBuzz', (data) => {
         console.log('Early buzz penalty:', data);
         setEarlyBuzzPenalty(true);
@@ -437,14 +649,36 @@ const GamePlayer = () => {
       newSocket.on('answerJudged', (data) => {
         console.log('Answer judged:', data);
         
+        // Clear the answer timer
+        if (answerTimerRef.current) {
+          clearInterval(answerTimerRef.current);
+          answerTimerRef.current = null;
+        }
+        
+        setShowTimer(false);
+        
         // Update this player's score if it's their answer
         if (data.playerId === newSocket.id) {
           setJudged(data.correct);
           setScore(data.score);
           
+          // Play appropriate sound effect
+          if (data.correct) {
+            playSound('CORRECT').catch(e => console.log('Error playing correct sound:', e));
+          } else {
+            playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
+          }
+          
           // If correct, this player will select next question
           if (data.correct && data.selectingPlayerId === newSocket.id) {
             setCanSelectQuestion(true);
+          }
+        } else {
+          // Still play sounds for other players' answers
+          if (data.correct) {
+            playSound('CORRECT').catch(e => console.log('Error playing correct sound:', e));
+          } else {
+            playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
           }
         }
       });
@@ -458,6 +692,12 @@ const GamePlayer = () => {
         setJudged(null);
         setAnswer('');
         
+        // Update the board state if it's provided
+        if (data.board) {
+          setBoard(data.board);
+          console.log('Updated board state with revealed questions:', data.board);
+        }
+        
         if (data.selectingPlayerId === newSocket.id) {
           setCanSelectQuestion(true);
         } else {
@@ -469,9 +709,176 @@ const GamePlayer = () => {
       newSocket.on('timeExpired', (data) => {
         console.log('Time expired for question:', data);
         setCanBuzz(false);
-        // Display a message that time expired
+        
+        // Play the incorrect sound
+        playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
+        
+        // Display a message that time expired and show the answer
         setShowBuzzer(false);
         setJudged(false); // Show incorrect status with custom message
+        
+        // Show the answer for all clients, including mobile
+        if (data.answer) {
+          setShowAnswer(true);
+          setAnswerText(data.answer);
+        }
+      });
+
+      // Add handlers for round transitions
+      newSocket.on('roundChanged', (data) => {
+        console.log('Round changed:', data);
+        
+        // Show round transition screen
+        setRoundTransitionTitle(data.round === 'doubleJeopardy' ? 'DOUBLE JEOPARDY!' : 'NEXT ROUND');
+        setRoundTransitionMessage(data.message || '');
+        setShowRoundTransition(true);
+        
+        // Update game state
+        setCurrentRound(data.round);
+        setGameState('inProgress');
+        
+        // Update board and categories
+        if (data.categories) setCategories(data.categories);
+        if (data.board) setBoard(data.board);
+        
+        // Check if it's this player's turn to select a question
+        if (data.selectingPlayerId === newSocket.id) {
+          setCanSelectQuestion(true);
+        } else {
+          setCanSelectQuestion(false);
+        }
+        
+        // Hide round transition after 5 seconds
+        if (roundTransitionTimeoutRef.current) {
+          clearTimeout(roundTransitionTimeoutRef.current);
+        }
+        
+        roundTransitionTimeoutRef.current = setTimeout(() => {
+          setShowRoundTransition(false);
+        }, 5000);
+      });
+      
+      // Add handlers for Final Jeopardy
+      newSocket.on('finalJeopardy', (data) => {
+        console.log('Final Jeopardy:', data);
+        
+        // Show round transition screen
+        setRoundTransitionTitle('FINAL JEOPARDY!');
+        setRoundTransitionMessage(data.message || '');
+        setShowRoundTransition(true);
+        
+        // Update game state
+        setCurrentRound('finalJeopardy');
+        setGameState('finalJeopardy');
+        
+        // Check if this player is eligible to participate
+        const canParticipate = data.eligiblePlayers?.includes(newSocket.id) || false;
+        
+        // Set up final jeopardy state
+        setFinalJeopardyState(prev => ({
+          ...prev,
+          category: data.category,
+          canParticipate,
+          errorMessage: canParticipate ? '' : 'You are not eligible for Final Jeopardy (requires a positive score)'
+        }));
+        
+        // Hide round transition after 5 seconds
+        if (roundTransitionTimeoutRef.current) {
+          clearTimeout(roundTransitionTimeoutRef.current);
+        }
+        
+        roundTransitionTimeoutRef.current = setTimeout(() => {
+          setShowRoundTransition(false);
+        }, 5000);
+      });
+      
+      newSocket.on('finalJeopardyQuestion', (data) => {
+        console.log('Final Jeopardy question:', data);
+        
+        // Update final jeopardy state
+        setFinalJeopardyState(prev => ({
+          ...prev,
+          question: data.question,
+          showQuestion: true
+        }));
+      });
+      
+      newSocket.on('wagerReceived', (data) => {
+        console.log('Wager received confirmation:', data);
+        
+        // Update final jeopardy state
+        setFinalJeopardyState(prev => ({
+          ...prev,
+          wagerSubmitted: true
+        }));
+      });
+      
+      newSocket.on('answerReceived', (data) => {
+        console.log('Final answer received confirmation:', data);
+        
+        // Update final jeopardy state
+        setFinalJeopardyState(prev => ({
+          ...prev,
+          answerSubmitted: true
+        }));
+      });
+      
+      newSocket.on('finalAnswerRevealed', (data) => {
+        console.log('Final answer revealed:', data);
+        
+        // Update final jeopardy state
+        setFinalJeopardyState(prev => ({
+          ...prev,
+          showAnswer: true,
+          answer: data.answer
+        }));
+      });
+      
+      newSocket.on('finalAnswerJudged', (data) => {
+        console.log('Final answer judged:', data);
+        
+        // Play appropriate sound
+        if (data.correct) {
+          playSound('CORRECT').catch(e => console.log('Error playing correct sound:', e));
+        } else {
+          playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
+        }
+        
+        // Update score if it's this player
+        if (data.playerId === newSocket.id) {
+          setScore(data.score);
+        }
+        
+        // Update players list with new scores
+        setPlayers(prev => prev.map(p => 
+          p.id === data.playerId ? { ...p, score: data.score } : p
+        ));
+      });
+      
+      newSocket.on('gameOver', (data) => {
+        console.log('Game over:', data);
+        
+        // Show game over screen
+        setRoundTransitionTitle('GAME OVER!');
+        const winnerMessage = data.winner 
+          ? `Winner: ${data.winner.name} with $${data.winner.score}` 
+          : 'No winner';
+        setRoundTransitionMessage(winnerMessage);
+        setShowRoundTransition(true);
+        
+        // Update game state
+        setGameState('gameOver');
+        setCurrentRound('gameOver');
+        
+        // Update player list with final scores
+        if (data.players) {
+          setPlayers(data.players);
+        }
+        
+        // Navigate to home after 8 seconds
+        setTimeout(() => {
+          navigate('/');
+        }, 8000);
       });
     };
     
@@ -481,12 +888,21 @@ const GamePlayer = () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
       }
-      if (buzzerSound.current) {
-        buzzerSound.current.pause();
-        buzzerSound.current.src = '';
-      }
+      
+      // Clean up all sounds
+      cleanupSounds();
+      
       if (penaltyTimeoutRef.current) {
         clearTimeout(penaltyTimeoutRef.current);
+      }
+      if (questionTimerRef.current) {
+        clearInterval(questionTimerRef.current);
+      }
+      if (answerTimerRef.current) {
+        clearInterval(answerTimerRef.current);
+      }
+      if (roundTransitionTimeoutRef.current) {
+        clearTimeout(roundTransitionTimeoutRef.current);
       }
     };
   }, [roomCode, navigate]);
@@ -514,12 +930,19 @@ const GamePlayer = () => {
   
   const handleBuzz = () => {
     if (socket && canBuzz && !hasBuzzed) {
-      if (buzzerSound.current) {
-        buzzerSound.current.play().catch(e => console.log('Error playing sound:', e));
-      }
+      playSound('BUZZER').catch(e => console.log('Error playing buzzer sound:', e));
       
       socket.emit('buzz', roomCode);
       setHasBuzzed(true);
+      
+      // Clear question timer
+      if (questionTimerRef.current) {
+        clearInterval(questionTimerRef.current);
+        questionTimerRef.current = null;
+      }
+      
+      // Start answer timer
+      startAnswerTimer();
     }
   };
   
@@ -538,11 +961,23 @@ const GamePlayer = () => {
   };
   
   const handleSelectQuestion = (categoryIndex, valueIndex) => {
-    if (socket && canSelectQuestion) {
-      console.log(`Selecting question: category ${categoryIndex}, value ${valueIndex}`);
-      socket.emit('selectQuestion', roomCode, categoryIndex, valueIndex);
-      setCanSelectQuestion(false);
+    if (!socket || !canSelectQuestion) return;
+    
+    // Double check if the question is already revealed
+    const category = categories[categoryIndex];
+    const isRevealed = board[category]?.[valueIndex]?.revealed === true;
+    
+    if (isRevealed) {
+      setError('That question has already been played. Please select another one.');
+      setTimeout(() => {
+        setError('');
+      }, 3000);
+      return;
     }
+    
+    console.log(`Selecting question: category ${categoryIndex}, value ${valueIndex}`);
+    socket.emit('selectQuestion', roomCode, categoryIndex, valueIndex);
+    setCanSelectQuestion(false);
   };
   
   // Customize status message for timeouts
@@ -553,11 +988,223 @@ const GamePlayer = () => {
     return 'Time expired! No one answered correctly.';
   };
   
+  // Add functions to handle the timers
+  const startQuestionTimer = (startTime = 5) => {
+    setQuestionTimer(startTime);
+    setShowTimer(true);
+    
+    // Clear any existing timer
+    if (questionTimerRef.current) {
+      clearInterval(questionTimerRef.current);
+    }
+    
+    const startTimeMs = Date.now();
+    const duration = startTime * 1000; // Convert to milliseconds
+    
+    // Set up interval to update timer every 33ms for smoother animation (roughly 30fps)
+    questionTimerRef.current = setInterval(() => {
+      const elapsed = Date.now() - startTimeMs;
+      const remaining = Math.max(0, duration - elapsed) / 1000; // Convert back to seconds
+      
+      setQuestionTimer(remaining);
+      
+      if (remaining <= 0) {
+        clearInterval(questionTimerRef.current);
+        questionTimerRef.current = null;
+      }
+    }, 33);
+  };
+
+  const startAnswerTimer = () => {
+    setAnswerTimer(5);
+    setShowTimer(true);
+    
+    // Clear any existing timer
+    if (answerTimerRef.current) {
+      clearInterval(answerTimerRef.current);
+    }
+    
+    const startTimeMs = Date.now();
+    const duration = 5000; // 5 seconds in milliseconds
+    
+    // Set up interval to update timer every 33ms for smoother animation
+    answerTimerRef.current = setInterval(() => {
+      const elapsed = Date.now() - startTimeMs;
+      const remaining = Math.max(0, duration - elapsed) / 1000; // Convert back to seconds
+      
+      setAnswerTimer(remaining);
+      
+      if (remaining <= 0) {
+        clearInterval(answerTimerRef.current);
+        answerTimerRef.current = null;
+      }
+    }, 33);
+  };
+  
+  // Add functions for Final Jeopardy
+  const handleWagerSubmit = (e) => {
+    e.preventDefault();
+    
+    // Validate wager amount
+    const wagerAmount = parseInt(finalJeopardyState.wager);
+    if (isNaN(wagerAmount) || wagerAmount < 0 || wagerAmount > score) {
+      setFinalJeopardyState(prev => ({
+        ...prev,
+        errorMessage: `Wager must be between 0 and ${score}`
+      }));
+      return;
+    }
+    
+    if (socket && socket.connected) {
+      console.log(`Submitting wager: $${wagerAmount}`);
+      socket.emit('finalJeopardyWager', {
+        roomCode,
+        wager: wagerAmount
+      });
+    }
+  };
+  
+  const handleFinalAnswerSubmit = (e) => {
+    e.preventDefault();
+    
+    if (!finalJeopardyState.answer.trim()) {
+      setFinalJeopardyState(prev => ({
+        ...prev,
+        errorMessage: 'Please enter an answer'
+      }));
+      return;
+    }
+    
+    if (socket && socket.connected) {
+      console.log(`Submitting final answer: ${finalJeopardyState.answer}`);
+      socket.emit('finalJeopardyAnswer', {
+        roomCode,
+        answer: finalJeopardyState.answer.trim()
+      });
+    }
+  };
+  
+  // Add helper function to render Current Round info
+  const renderRoundInfo = () => {
+    if (!currentRound) return null;
+    
+    let roundDisplay = "";
+    switch (currentRound) {
+      case 'singleJeopardy':
+        roundDisplay = "Single Jeopardy";
+        break;
+      case 'doubleJeopardy':
+        roundDisplay = "Double Jeopardy";
+        break;
+      case 'finalJeopardy':
+        roundDisplay = "Final Jeopardy";
+        break;
+      case 'gameOver':
+        roundDisplay = "Game Over";
+        break;
+      default:
+        roundDisplay = currentRound;
+    }
+    
+    return roundDisplay;
+  };
+  
+  // Add Final Jeopardy rendering
+  const renderFinalJeopardy = () => {
+    if (!finalJeopardyState.canParticipate) {
+      return (
+        <WaitingMessage>
+          <h2>Final Jeopardy</h2>
+          <p>{finalJeopardyState.errorMessage || "You are not eligible to play Final Jeopardy"}</p>
+          <p>Watch the host screen for the final results!</p>
+        </WaitingMessage>
+      );
+    }
+    
+    return (
+      <FinalJeopardyContainer>
+        <FinalCategory>{finalJeopardyState.category}</FinalCategory>
+        
+        {!finalJeopardyState.wagerSubmitted && !finalJeopardyState.showQuestion && (
+          <form onSubmit={handleWagerSubmit} style={{ width: '100%', maxWidth: '300px' }}>
+            <h3>Enter Your Wager</h3>
+            <WagerInfo>
+              <WagerValue>Your Score: ${score}</WagerValue>
+              <WagerValue>Max Wager: ${score}</WagerValue>
+            </WagerInfo>
+            <WagerInput 
+              type="number" 
+              min="0" 
+              max={score} 
+              value={finalJeopardyState.wager}
+              onChange={(e) => setFinalJeopardyState(prev => ({
+                ...prev,
+                wager: e.target.value,
+                errorMessage: ''
+              }))}
+              placeholder="Enter your wager"
+            />
+            {finalJeopardyState.errorMessage && (
+              <WagerValue $error={true}>{finalJeopardyState.errorMessage}</WagerValue>
+            )}
+            <SubmitBtn type="submit">Submit Wager</SubmitBtn>
+          </form>
+        )}
+        
+        {finalJeopardyState.wagerSubmitted && !finalJeopardyState.showQuestion && (
+          <WaitingMessage>
+            <h3>Wager Submitted</h3>
+            <p>Waiting for all players to submit their wagers...</p>
+          </WaitingMessage>
+        )}
+        
+        {finalJeopardyState.showQuestion && !finalJeopardyState.answerSubmitted && (
+          <>
+            <FinalQuestion>{finalJeopardyState.question}</FinalQuestion>
+            <form onSubmit={handleFinalAnswerSubmit} style={{ width: '100%', maxWidth: '300px' }}>
+              <AnswerInput 
+                type="text" 
+                value={finalJeopardyState.answer}
+                onChange={(e) => setFinalJeopardyState(prev => ({
+                  ...prev,
+                  answer: e.target.value,
+                  errorMessage: ''
+                }))}
+                placeholder="Your answer..."
+              />
+              {finalJeopardyState.errorMessage && (
+                <WagerValue $error={true}>{finalJeopardyState.errorMessage}</WagerValue>
+              )}
+              <SubmitBtn type="submit">Submit Answer</SubmitBtn>
+            </form>
+          </>
+        )}
+        
+        {finalJeopardyState.answerSubmitted && !finalJeopardyState.showAnswer && (
+          <WaitingMessage>
+            <h3>Answer Submitted</h3>
+            <p>Waiting for all players to submit their answers...</p>
+          </WaitingMessage>
+        )}
+        
+        {finalJeopardyState.showAnswer && (
+          <WaitingMessage>
+            <h3>The Correct Answer:</h3>
+            <p style={{ fontSize: '1.5rem', color: 'var(--jeopardy-value)' }}>
+              {finalJeopardyState.answer}
+            </p>
+            <p>The host is now judging all answers...</p>
+          </WaitingMessage>
+        )}
+      </FinalJeopardyContainer>
+    );
+  };
+  
   if (currentQuestion) {
     return (
       <GamePlayerContainer $canBuzzIn={canBuzz && !hasBuzzed}>
         <Header>
-          <Title>Jeoparty! Player</Title>
+          <Title>Jeoparty! Player - {renderRoundInfo()}</Title>
           <PlayerInfo>
             {playerName || 'Guest'} - ${score}
           </PlayerInfo>
@@ -567,6 +1214,17 @@ const GamePlayer = () => {
           <Category>{currentQuestion.category}</Category>
           <Value>${currentQuestion.value}</Value>
           {currentQuestion.text}
+          {showTimer && (
+            hasBuzzed 
+              ? <AnswerTimerBar $time={answerTimer} /> 
+              : <AnswerTimerBar $time={questionTimer} />
+          )}
+          {showAnswer && (
+            <AnswerReveal>
+              <AnswerLabel>The correct answer was:</AnswerLabel>
+              <AnswerText>{answerText}</AnswerText>
+            </AnswerReveal>
+          )}
         </Question>
         
         {showBuzzer && !hasBuzzed ? (
@@ -606,6 +1264,41 @@ const GamePlayer = () => {
             {getStatusMessage()}
           </Status>
         )}
+        
+        {/* Add round transition overlay */}
+        {showRoundTransition && (
+          <RoundTransition>
+            <RoundTitle>{roundTransitionTitle}</RoundTitle>
+            <RoundSubtitle>
+              {currentRound === 'gameOver' ? 'Final Scores' : 'Get Ready!'}
+            </RoundSubtitle>
+            <RoundMessage>{roundTransitionMessage}</RoundMessage>
+          </RoundTransition>
+        )}
+      </GamePlayerContainer>
+    );
+  }
+  
+  if (gameState === 'finalJeopardy') {
+    return (
+      <GamePlayerContainer>
+        <Header>
+          <Title>Jeoparty! Player - Final Jeopardy</Title>
+          <PlayerInfo>
+            {playerName || 'Guest'} - ${score}
+          </PlayerInfo>
+        </Header>
+        
+        {renderFinalJeopardy()}
+        
+        {/* Add round transition overlay */}
+        {showRoundTransition && (
+          <RoundTransition>
+            <RoundTitle>{roundTransitionTitle}</RoundTitle>
+            <RoundSubtitle>Get Ready!</RoundSubtitle>
+            <RoundMessage>{roundTransitionMessage}</RoundMessage>
+          </RoundTransition>
+        )}
       </GamePlayerContainer>
     );
   }
@@ -630,6 +1323,17 @@ const GamePlayer = () => {
             </>
           )}
         </WaitingMessage>
+        
+        {/* Add round transition overlay */}
+        {showRoundTransition && (
+          <RoundTransition>
+            <RoundTitle>{roundTransitionTitle}</RoundTitle>
+            <RoundSubtitle>
+              {currentRound === 'gameOver' ? 'Final Scores' : 'Get Ready!'}
+            </RoundSubtitle>
+            <RoundMessage>{roundTransitionMessage}</RoundMessage>
+          </RoundTransition>
+        )}
       </GamePlayerContainer>
     );
   }
@@ -660,6 +1364,15 @@ const GamePlayer = () => {
             </SubmitBtn>
           </form>
         </div>
+        
+        {/* Add round transition overlay */}
+        {showRoundTransition && (
+          <RoundTransition>
+            <RoundTitle>{roundTransitionTitle}</RoundTitle>
+            <RoundSubtitle>Get Ready!</RoundSubtitle>
+            <RoundMessage>{roundTransitionMessage}</RoundMessage>
+          </RoundTransition>
+        )}
       </GamePlayerContainer>
     );
   }
@@ -691,6 +1404,15 @@ const GamePlayer = () => {
             )}
           </PlayerList>
         </WaitingMessage>
+        
+        {/* Add round transition overlay */}
+        {showRoundTransition && (
+          <RoundTransition>
+            <RoundTitle>{roundTransitionTitle}</RoundTitle>
+            <RoundSubtitle>Get Ready!</RoundSubtitle>
+            <RoundMessage>{roundTransitionMessage}</RoundMessage>
+          </RoundTransition>
+        )}
       </GamePlayerContainer>
     );
   }
@@ -699,7 +1421,7 @@ const GamePlayer = () => {
     return (
       <GamePlayerContainer>
         <Header>
-          <Title>Jeoparty! Player</Title>
+          <Title>Jeoparty! Player - {renderRoundInfo()}</Title>
           <PlayerInfo>
             {playerName || 'Guest'} - ${score}
           </PlayerInfo>
@@ -708,6 +1430,11 @@ const GamePlayer = () => {
         {canSelectQuestion ? (
           <>
             <SelectingMessage>Your turn to select a question!</SelectingMessage>
+            {error && (
+              <Status $correct={false} style={{ marginBottom: '10px' }}>
+                {error}
+              </Status>
+            )}
             <MiniBoard>
               <MiniCategoryRow>
                 {categories.map((category, index) => (
@@ -718,15 +1445,17 @@ const GamePlayer = () => {
               {[0, 1, 2, 3, 4].map(valueIndex => (
                 <MiniGridRow key={valueIndex}>
                   {categories.map((category, categoryIndex) => {
-                    const revealed = board[category]?.[valueIndex]?.revealed;
+                    // Check if the question has been revealed
+                    const isRevealed = board[category]?.[valueIndex]?.revealed === true;
                     return (
                       <MiniCell 
                         key={`${categoryIndex}-${valueIndex}`}
-                        onClick={() => handleSelectQuestion(categoryIndex, valueIndex)}
-                        $revealed={revealed}
-                        disabled={revealed}
+                        onClick={() => !isRevealed && handleSelectQuestion(categoryIndex, valueIndex)}
+                        $revealed={isRevealed}
+                        disabled={isRevealed}
+                        style={isRevealed ? { backgroundColor: 'rgba(0,0,0,0.5)', color: 'transparent' } : {}}
                       >
-                        ${board[category]?.[valueIndex]?.value || (valueIndex + 1) * 200}
+                        {isRevealed ? '' : `$${board[category]?.[valueIndex]?.value || (valueIndex + 1) * 200}`}
                       </MiniCell>
                     );
                   })}
@@ -739,6 +1468,15 @@ const GamePlayer = () => {
             <h2>Waiting for next question...</h2>
           </WaitingMessage>
         )}
+        
+        {/* Add round transition overlay */}
+        {showRoundTransition && (
+          <RoundTransition>
+            <RoundTitle>{roundTransitionTitle}</RoundTitle>
+            <RoundSubtitle>Get Ready!</RoundSubtitle>
+            <RoundMessage>{roundTransitionMessage}</RoundMessage>
+          </RoundTransition>
+        )}
       </GamePlayerContainer>
     );
   }
@@ -746,7 +1484,7 @@ const GamePlayer = () => {
   return (
     <GamePlayerContainer>
       <Header>
-        <Title>Jeoparty! Player</Title>
+        <Title>Jeoparty! Player - {renderRoundInfo()}</Title>
         <PlayerInfo>
           {playerName || 'Guest'} - ${score}
         </PlayerInfo>
@@ -754,6 +1492,15 @@ const GamePlayer = () => {
       <WaitingMessage>
         <h2>Waiting for game action...</h2>
       </WaitingMessage>
+      
+      {/* Add round transition overlay */}
+      {showRoundTransition && (
+        <RoundTransition>
+          <RoundTitle>{roundTransitionTitle}</RoundTitle>
+          <RoundSubtitle>Get Ready!</RoundSubtitle>
+          <RoundMessage>{roundTransitionMessage}</RoundMessage>
+        </RoundTransition>
+      )}
     </GamePlayerContainer>
   );
 };

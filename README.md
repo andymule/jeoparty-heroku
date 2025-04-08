@@ -10,21 +10,21 @@ A multiplayer Jeopardy-style game where a host displays the game board on a desk
 - **Multiplayer**: Multiple players can join a game room
 - **Score tracking**: Keep track of player scores
 - **Authentic gameplay**: Based on the classic Jeopardy format
+- **In-memory dataset**: Uses the entire Jeopardy clue dataset without requiring a database
 
 ## Tech Stack
 
 - **Frontend**: React with styled-components
 - **Backend**: Node.js with Express
 - **Real-time Communication**: Socket.io
-- **Database**: PostgreSQL
+- **Dataset**: In-memory using the combined_season1-40.tsv file (over 88,000 questions)
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js (v14+)
-- PostgreSQL
-- Jeopardy questions dataset (optional - sample questions included)
+- Jeopardy questions dataset (required)
 
 ### Installation
 
@@ -45,18 +45,10 @@ A multiplayer Jeopardy-style game where a host displays the game board on a desk
    npm install
    ```
 
-3. Set up the database:
-   - Create a PostgreSQL database named "jeoparty"
-   - Update `.env` file with your database credentials
-
-4. Import Jeopardy questions (optional):
+3. Set up the dataset:
    - Download the dataset from [jwolle1/jeopardy_clue_dataset](https://github.com/jwolle1/jeopardy_clue_dataset)
    - Place the combined_season1-40.tsv file in the data directory
-   - Run the import script:
-   ```
-   cd server
-   npm run import-data
-   ```
+   - The application will automatically load the dataset at startup
 
 ### Running the Application
 
@@ -76,6 +68,14 @@ A multiplayer Jeopardy-style game where a host displays the game board on a desk
    - Main game board (host): http://localhost:3000
    - Connect players by sharing the room code displayed on the host screen
 
+## How It Works
+
+The Jeoparty application loads the entire Jeopardy clue dataset (combined_season1-40.tsv) into memory at startup. This provides:
+
+- Fast access to all 88,000+ questions without database queries
+- No database setup or maintenance required
+- Full functionality even in environments where a database is not available
+
 ## Deployment to Heroku
 
 1. Create a new Heroku app:
@@ -83,27 +83,23 @@ A multiplayer Jeopardy-style game where a host displays the game board on a desk
    heroku create jeoparty-app
    ```
 
-2. Add PostgreSQL add-on:
-   ```
-   heroku addons:create heroku-postgresql:hobby-dev
-   ```
-
-3. Configure build settings:
+2. Configure build settings:
    ```
    heroku config:set NPM_CONFIG_PRODUCTION=false
    heroku config:set NODE_ENV=production
    ```
 
-4. Deploy the application:
+3. Deploy the application:
    ```
    git push heroku main
    ```
 
-5. Import the dataset:
+4. Ensure the dataset is included in your deployment:
    ```
-   heroku run bash
-   cd server
-   npm run import-data
+   # Make sure the data/combined_season1-40.tsv file is tracked in git
+   git add data/combined_season1-40.tsv
+   git commit -m "Add Jeopardy dataset"
+   git push heroku main
    ```
 
 ## Acknowledgements

@@ -54,7 +54,7 @@ const ValueCell = styled.button`
   align-items: center;
   justify-content: center;
   background-color: ${props => 
-    props.$revealed ? 'transparent' : 
+    props.$revealed ? 'rgba(0, 0, 0, 0.5)' :
     props.$disabled ? '#1a237e' : 'var(--jeopardy-board)'
   };
   color: ${props => props.$revealed ? 'transparent' : 'var(--jeopardy-value)'};
@@ -63,10 +63,11 @@ const ValueCell = styled.button`
   border: 2px solid #000;
   cursor: ${props => (props.$revealed || props.$disabled) ? 'default' : 'pointer'};
   transition: all 0.2s ease;
+  position: relative;
   
   &:hover {
     background-color: ${props => 
-      props.$revealed ? 'transparent' : 
+      props.$revealed ? 'rgba(0, 0, 0, 0.5)' : 
       props.$disabled ? '#1a237e' : 'var(--jeopardy-selected)'
     };
   }
@@ -82,10 +83,13 @@ const JeopardyBoard = ({ categories = [], board = {}, onSelectQuestion, disabled
     if (!onSelectQuestion || disabled) return;
     
     const category = categories[categoryIndex];
-    const revealed = board[category][valueIndex].revealed;
+    const item = board[category][valueIndex];
+    const revealed = item && item.revealed;
     
     if (!revealed) {
       onSelectQuestion(categoryIndex, valueIndex);
+    } else {
+      console.log('Cell is already revealed, ignoring click');
     }
   };
   
@@ -103,8 +107,9 @@ const JeopardyBoard = ({ categories = [], board = {}, onSelectQuestion, disabled
         {[0, 1, 2, 3, 4].map(valueIndex => (
           <Row key={valueIndex}>
             {categories.map((category, categoryIndex) => {
-              const revealed = board[category][valueIndex].revealed;
-              const value = board[category][valueIndex].value;
+              const item = board[category]?.[valueIndex];
+              const revealed = item ? item.revealed : false;
+              const value = item ? item.value : (valueIndex + 1) * 200;
               
               return (
                 <ValueCell 
@@ -113,6 +118,8 @@ const JeopardyBoard = ({ categories = [], board = {}, onSelectQuestion, disabled
                   $disabled={disabled}
                   $compact={compact}
                   onClick={() => handleCellClick(categoryIndex, valueIndex)}
+                  aria-disabled={revealed || disabled}
+                  aria-label={revealed ? `Played ${category} for $${value}` : `${category} for $${value}`}
                 >
                   {revealed ? '' : `$${value}`}
                 </ValueCell>

@@ -1,0 +1,115 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+You're a heroku expert. I want to make a web app on heroku that is a jeopardy game. This should have jeopardy, double jeopardy, and final jeopardy rounds just like the show. If a client is connecting with a desktop client, they get the main game board. If connecting with mobile device you get a buzzer and answering device. We use a downloaded jeopardy database of almost every historical game ever played. Try to make everything run through "npm run dev" for local testing, and make sure we set up a good testing and deployment pipeline for releasing for public use on heroku.
+
+The main board shows main game state and reads questions live, like jeopardy. The mobile client is a the buzzer per player and also lets the buzzing in player use keyboard to answer and hopefully also speak into the microphone if they want as well. 
+
+Here are the rules for the dataset:
+This dataset contains Jeopardy! clues from Season 1 through Season 40 (July 2024). It does not contain every clue that has appeared on the show. Dont make a script to download more clues from this dataset. 
+
+There are 523,118 clues in total. Most of them can be found in combined_season1-40.tsv.
+
+There are individual files for each season (located in the seasons folder). These files are small enough that you should be able to open them with Microsoft Excel or Google Sheets.
+
+Clues appearing in special matches outside the daily syndicated program are found in extra_matches.tsv. This file has 7,224 clues and they do not appear in the combined dataset.
+
+There is a kids_teen_matches.tsv file which contains only clues that were featured in Kids and Teen Tournament matches. These clues are also in the combined dataset but this file is included for convenience.
+
+Column Information
+
+Label	Description
+round	1 for Single Jeopardy, 2 for Double Jeopardy, or 3 for Final Jeopardy. (Note: These values are different in extra_matches.tsv to account for Triple Jeopardy.)
+clue_value	The clue's value on the board before any Daily Double wagering.
+daily_double_value	If the clue is a Daily Double, this column is the amount wagered. Otherwise it's zero.
+category	i.e. the top row of the board.
+comments	The host's comments about a category.
+answer	The prompt given to contestants.
+question	The correct response.
+air_date	The calendar date on which the episode first aired.
+notes	Misc. information about the clue, e.g. if it's from a special tournament match.
+Other Data
+
+A file with contestant scoring data can be found in the other_data folder. There are columns for each contestant's score after the Single, Double, and Final Jeopardy rounds. Most but not all episodes from the clue dataset are included.
+
+Here is the architecture stack:
+1. Core Stack
+Backend: Node.js with Express
+Frontend: React for responsive design across devices
+Real-time Communication: Socket.io for WebSockets
+2. Client-Server Architecture
+Single web app with responsive design that detects device type
+WebSockets for real-time game state synchronization
+Server maintains the source of truth for game state
+3. Implementation Approach
+Game Room System: Generate unique game codes for each session
+Role Assignment: Identify devices as "host" (desktop) or "player" (mobile). Only publicly ever list player names and dont ever treat the "host" like an active player. 
+State Management: Centralized game state on server with client updates via WebSockets
+4. Technical Components
+Authentication: Simple room-based auth with player names
+Database Structure: Questions table imported from tsv dataset combined_season1-40.tsv (71MB), game sessions table, players table
+Buzzer System: Time-synchronized to prevent unfair advantages
+Speech Recognition: Web Speech API for voice answers on mobile
+5. Heroku-Specific Considerations
+Standard or Performance dynos to handle WebSocket connections
+Add Redis add-on for pub/sub capabilities and caching
+Enable session affinity for WebSocket connections
+
+Here are some detailed rules about Jeopardy:
+Game Structure and Rounds
+
+Jeopardy! is usually divided into three main segments:
+
+Jeopardy Round (Single Jeopardy):
+The board consists of six categories, each containing five clues with increasing dollar values (commonly ranging from $200 for the easiest clues up to $1,000 for the toughest in this round).
+One clue on the board is hidden as a Daily Double, where only the contestant who selects it may answer after making a wager.
+Double Jeopardy Round:
+The board format is similar but values are doubled (clues typically range from $400 to $2,000).
+There are usually two (and sometimes more in special tournaments) Daily Doubles in this round.
+Since the stakes are higher (both because of doubled values and multiple Daily Doubles), wagering strategy becomes even more critical.
+Final Jeopardy Round:
+Only contestants with positive scores are allowed to participate.
+A single clue is presented in a given category.
+Before the clue is revealed, contestants write down a wager drawn from their current total, and after a fixed time (usually 30 seconds) they provide their response in writing.
+Correct responses add the wagered amount to their score; incorrect responses subtract it.
+Scoring and Payment Per Round
+
+Standard Clues: In both the Jeopardy and Double Jeopardy rounds, if a contestant answers correctly, the value shown on the board is added to their cumulative score; an incorrect response deducts the same amount.
+Daily Doubles:
+Unlike regular clues, Daily Doubles allow the contestant (who is the only one allowed to answer) to wager any amount up to their current total (or a predetermined maximum in some tournament formats).
+A correct wager increases the score by the wagered amount (rather than the preset board value), while an incorrect wager causes an equivalent deduction.
+Final Jeopardy:
+The final round works on a wagering system where contestants submit, in secret, how much of their score they are willing to risk on one final clue.
+The outcomes (addition for a correct answer or subtraction for an incorrect one) determine the final standings and hence which contestant wins the cash prize.
+Buzzer System: Ringing In and Timing
+
+A critical technical element of Jeopardy! is its electronic lock-out system, which governs contestant signaling:
+
+Activation and Timing Window:
+The game’s studio system is finely tuned so that once the host completes reading a clue, the buzzer system is activated for contestants.
+While there isn’t a precise “countdown” publicly mentioned, the effective window to ring in is extremely short—often fractions of a second matter. In practice, contestants are trained to be ready immediately after the host’s delivery of the entire clue.
+Ringing In:
+Contestants press a signaling device (buzzer) to indicate they want to answer. The first to press is given the opportunity to respond.
+Penalties for Premature Buzzing:
+If a player buzzes in early, their next buzz-in wont register until a 0.2 second cooldown has passed (this should be maintained on the server).
+Daily Double Exception:
+On Daily Double clues, the normal buzzer mechanics are disabled. The contestant who selected the Daily Double is allowed to see the clue and then, after making a wager, provide an answer without any ring-in process. They have ten seconds to answer instead of the normal five.
+
+Time Allowed for Responses
+Regular Clues (Jeopardy and Double Jeopardy):
+Contestants have 7 seconds to respond after buzzing in. They have five seconds to buzz-in after question is read and "released" for buzzing. 
+Final Jeopardy:
+Once the Final Jeopardy clue and its category are revealed, contestants have a fixed period (usually 30 seconds) to write down their response.
+During this interval, contestants must simultaneously manage risk (in determining how much to wager) and recall relevant information.
+
+Technical Infrastructure and Game Management
+Score Tracking and Board Control:
+The game uses an integrated computer system that manages board displays, scorekeeping, and clue selections in real time.
+Each correct or incorrect response immediately updates the contestant’s score on a visible scoreboard, which is critical both for gameplay and spectator engagement.
+
+You will use the clues from data/combined_season1-40.tsv
+The desktop client lets you input a year range with text that you'd like to play a random game from. 
+If players select a question that requires an image to be shown as indicated by the clue database, instead just remove that question from the game altogether and treat it as though it has already been selected. [TODO in the future we can do a google image search? dont implement yet]. Generally, if something seems like it is missing, just act like that question has already been answered this round (I see some missing questions for example)
+i want checkAnswerCorrectness to be permissive. ignore case sensitivity for one, but also use a similarity algorithm (hopefully from an online library) and allow correct reponse if the user if very close to the actual response in a way that suggests they knew the answer. 
