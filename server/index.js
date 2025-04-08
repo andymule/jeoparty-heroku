@@ -229,9 +229,170 @@ const GAME_ROUNDS = {
   GAME_OVER: 'gameOver'
 };
 
+// Function to set up the game board for a specific game
+async function setupGameBoard(roomCode) {
+  const gameState = gameStates[roomCode];
+  
+  if (!gameState) {
+    console.error(`Game state not found for room ${roomCode}`);
+    throw new Error(`Game state not found for room ${roomCode}`);
+  }
+  
+  try {
+    console.log(`Setting up game board for room ${roomCode}...`);
+    
+    // Get all available categories - always use in-memory dataset
+    const allCategories = getCategories();
+    
+    if (!allCategories || allCategories.length === 0) {
+      console.error(`No categories available in dataset. Ensure the dataset is properly loaded.`);
+      throw new Error(`No categories available in dataset. Ensure the dataset is properly loaded.`);
+    }
+    
+    console.log(`Found ${allCategories.length} total categories in dataset`);
+    
+    // Optional filtering by year range
+    let filteredCategories = allCategories;
+    if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
+      // Filter in-memory dataset by year range
+      const startYear = parseInt(gameState.yearRange.start);
+      const endYear = parseInt(gameState.yearRange.end);
+      
+      console.log(`Filtering questions by year range: ${startYear}-${endYear}`);
+      
+      // Get filtered questions by year range
+      const filteredQuestions = getQuestionsByYearRange(startYear, endYear);
+      console.log(`Found ${filteredQuestions.length} questions in year range ${startYear}-${endYear}`);
+      
+      // Extract unique categories from filtered dataset
+      const uniqueCategories = new Set();
+      filteredQuestions.forEach(q => uniqueCategories.add(q.category));
+      filteredCategories = Array.from(uniqueCategories).map(category => ({ category }));
+      
+      console.log(`Found ${filteredCategories.length} unique categories in year range ${startYear}-${endYear}`);
+    }
+    
+    if (filteredCategories.length < 6) {
+      console.warn(`Warning: Only found ${filteredCategories.length} categories after filtering, which is less than the 6 required.`);
+      console.warn(`Using unfiltered categories to ensure enough content.`);
+      filteredCategories = allCategories;
+    }
+    
+    // Randomly select 6 categories
+    const shuffledCategories = filteredCategories.sort(() => 0.5 - Math.random());
+    const selectedCategories = shuffledCategories.slice(0, 6);
+    
+    // Store selected categories
+    gameState.categories = selectedCategories.map(c => c.category || c);
+    
+    console.log(`Selected 6 categories for game board:`, gameState.categories);
+    
+    // Initialize board with empty questions
+    gameState.board = {};
+    
+    // Populate board with questions for each category
+    for (const category of gameState.categories) {
+      // Get questions from in-memory dataset
+      let categoryQuestions = getQuestionsByCategory(category);
+      
+      if (!categoryQuestions || categoryQuestions.length === 0) {
+        console.warn(`No questions found for category "${category}". Creating placeholder questions.`);
+        categoryQuestions = [];
+      } else {
+        console.log(`Found ${categoryQuestions.length} questions for category "${category}"`);
+      }
+      
+      // Apply year range filter if needed
+      if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
+        const startYear = parseInt(gameState.yearRange.start);
+        const endYear = parseInt(gameState.yearRange.end);
+        
+        categoryQuestions = categoryQuestions.filter(q => {
+          if (!q.air_date) return false;
+          const year = new Date(q.air_date).getFullYear();
+          return year >= startYear && year <= endYear;
+        });
+        
+        console.log(`After year filtering: ${categoryQuestions.length} questions for category "${category}"`);
+      }
+      
+      // Filter by round
+      categoryQuestions = categoryQuestions.filter(q => q.round === gameState.round);
+      console.log(`After round filtering: ${categoryQuestions.length} questions for round ${gameState.round} in category "${category}"`);
+      
+      // Sort by value and select 5 questions (or fewer if not enough available)
+      categoryQuestions.sort((a, b) => a.clue_value - b.clue_value);
+      
+      // If not enough questions, we'll need to adapt
+      gameState.board[category] = [];
+      
+      // Add questions to the board
+      for (let i = 0; i < 5; i++) {
+        const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+        
+        // Find a suitable question with appropriate value
+        const suitableQuestions = categoryQuestions.filter(q => 
+          q.clue_value === value || (q.clue_value === 0 && q.round === gameState.round)
+        );
+        
+        if (suitableQuestions.length > 0) {
+          // Randomly select one question
+          const question = suitableQuestions[Math.floor(Math.random() * suitableQuestions.length)];
+          
+          // Mark one random question as a daily double
+          const isDaily = 
+            (gameState.round === 1 && Math.random() < 0.05 && !gameState.board.dailyDouble) ||
+            (gameState.round === 2 && Math.random() < 0.1 && gameState.board.dailyDoubleCount < 2);
+          
+          if (isDaily) {
+            if (gameState.round === 1) {
+              gameState.board.dailyDouble = `${category}-${value}`;
+            } else {
+              if (!gameState.board.dailyDoubleCount) gameState.board.dailyDoubleCount = 0;
+              gameState.board.dailyDoubleCount++;
+              
+              if (gameState.board.dailyDouble) {
+                gameState.board.dailyDouble2 = `${category}-${value}`;
+              } else {
+                gameState.board.dailyDouble = `${category}-${value}`;
+              }
+            }
+          }
+          
+          gameState.board[category].push({
+            id: question.id,
+            value,
+            question: question.answer, // Question is actually the clue shown to players
+            answer: question.question, // Answer is what players must respond with
+            revealed: false,
+            isDaily
+          });
+        } else {
+          // If no suitable question, create an empty slot
+          console.warn(`No suitable question found for value $${value} in category "${category}". Creating placeholder.`);
+          gameState.board[category].push({
+            id: null,
+            value,
+            question: "No question available",
+            answer: "No answer available",
+            revealed: true, // Mark as revealed so it can't be selected
+            isDaily: false
+          });
+        }
+      }
+    }
+    
+    console.log(`Game board created for room ${roomCode} with categories:`, gameState.categories);
+  } catch (error) {
+    console.error('Error setting up game board:', error);
+    throw error; // Propagate error to caller
+  }
+}
+
 // Create a new game session
 app.post('/api/games', async (req, res) => {
   try {
+    console.log('POST /api/games - Creating new game:', req.body);
     const { hostName, yearRange } = req.body;
     // Generate a unique 4-character room code
     const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
@@ -258,15 +419,88 @@ app.post('/api/games', async (req, res) => {
     };
     
     // Create a randomly selected set of categories and questions for this game
-    await setupGameBoard(roomCode);
+    try {
+      await setupGameBoard(roomCode);
+      console.log(`Game board successfully created for room ${roomCode}`);
+    } catch (setupError) {
+      console.error(`Error setting up game board for room ${roomCode}:`, setupError);
+      return res.status(500).json({ error: `Failed to setup game board: ${setupError.message}` });
+    }
     
+    console.log(`Game successfully created with room code ${roomCode}`);
     res.json({
       roomCode,
       gameState: gameStates[roomCode]
     });
   } catch (error) {
     console.error('Error creating game:', error);
-    res.status(500).json({ error: 'Failed to create game' });
+    res.status(500).json({ 
+      error: 'Failed to create game', 
+      details: error.message,
+      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
+    });
+  }
+});
+
+// Add compatibility endpoint for /api/games/create
+app.post('/api/games/create', async (req, res) => {
+  console.log('POST /api/games/create - Redirecting to /api/games:', req.body);
+  try {
+    // Forward to the main endpoint
+    const { hostName, yearRange, gameDate } = req.body;
+    
+    if (!hostName) {
+      return res.status(400).json({ 
+        error: 'Host name is required',
+        requestBody: req.body 
+      });
+    }
+    
+    // Create a new game state
+    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+    
+    gameStates[roomCode] = {
+      roomCode,
+      hostId: null,
+      hostName,
+      players: [],
+      currentState: 'waiting',
+      board: null,
+      categories: [],
+      selectedQuestion: null,
+      round: 1,
+      yearRange: yearRange || { start: 1984, end: 2024 },
+      gameDate,
+      scores: {},
+      activePlayer: null,
+      buzzerEnabled: false,
+      buzzedPlayers: [],
+      dailyDoubleWager: 0,
+      usedQuestions: [],
+      isInMemoryMode: true
+    };
+    
+    // Create a randomly selected set of categories and questions for this game
+    try {
+      await setupGameBoard(roomCode);
+      console.log(`Game board successfully created for room ${roomCode}`);
+    } catch (setupError) {
+      console.error(`Error setting up game board for room ${roomCode}:`, setupError);
+      return res.status(500).json({ error: `Failed to setup game board: ${setupError.message}` });
+    }
+    
+    console.log(`Game successfully created with room code ${roomCode}`);
+    res.json({
+      roomCode,
+      gameState: gameStates[roomCode]
+    });
+  } catch (error) {
+    console.error('Error creating game via /api/games/create:', error);
+    res.status(500).json({ 
+      error: 'Failed to create game', 
+      details: error.message,
+      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
+    });
   }
 });
 
@@ -289,6 +523,44 @@ app.get('/api/status', (req, res) => {
       categories: getCategories().length
     },
     serverTime: new Date().toISOString()
+  });
+});
+
+// Add a debug endpoint to view active games
+app.get('/api/debug', (req, res) => {
+  // Only allow in development or with debug API key for security
+  const apiKey = req.query.key || '';
+  const debugEnabled = process.env.NODE_ENV !== 'production' || apiKey === process.env.DEBUG_API_KEY;
+  
+  if (!debugEnabled) {
+    return res.status(403).json({ error: 'Debug access forbidden in production without valid API key' });
+  }
+  
+  const activeGames = {};
+  Object.keys(gameStates).forEach(roomCode => {
+    const game = gameStates[roomCode];
+    activeGames[roomCode] = {
+      hostConnected: !!io.sockets.sockets.get(game.hostId || game.host),
+      state: game.state || game.gameState,
+      playerCount: game.players.filter(p => !p.isHost).length,
+      connectedPlayerCount: game.players.filter(p => !p.isHost && p.connected).length,
+      disconnectedPlayerCount: game.players.filter(p => !p.isHost && !p.connected).length,
+      currentRound: game.currentRound,
+      startTime: game.startTime,
+      uptime: game.startTime ? Math.floor((Date.now() - game.startTime) / 1000) : null
+    };
+  });
+  
+  // Get total connected socket count
+  const connectedSockets = io.sockets.sockets.size;
+  
+  res.json({
+    environment: process.env.NODE_ENV || 'development',
+    serverUptime: process.uptime(),
+    activeGames: activeGames,
+    gameCount: Object.keys(gameStates).length,
+    connectedSockets: connectedSockets,
+    memoryUsage: process.memoryUsage()
   });
 });
 
@@ -389,130 +661,155 @@ io.on('connection', (socket) => {
   socket.on('createGame', async (data) => {
     console.log('Create game request received:', data);
     
-    // Handle both string and object parameters
-    let playerName;
-    let roomCode;
-    let yearRange;
-    
-    if (typeof data === 'string') {
-      playerName = data;
-      console.log('createGame: received string parameter:', playerName);
-    } else if (typeof data === 'object') {
-      if (data.playerName) {
-        playerName = data.playerName;
-        console.log('createGame: received object parameter with playerName:', playerName);
-      }
+    try {
+      // Handle both string and object parameters
+      let playerName;
+      let roomCode;
+      let yearRange;
       
-      if (data.roomCode) {
-        roomCode = data.roomCode.toUpperCase();
-        console.log('createGame: received roomCode in parameter:', roomCode);
-      }
-      
-      if (data.yearRange) {
-        yearRange = data.yearRange;
-        console.log('createGame: received yearRange parameter:', yearRange);
-      }
-    }
-    
-    if (!playerName) {
-      playerName = 'Host';
-      console.log('createGame: using default playerName:', playerName);
-    }
-    
-    if (!yearRange) {
-      yearRange = { start: 1984, end: 2024 };
-      console.log('createGame: using default yearRange:', yearRange);
-    }
-    
-    // Generate a room code if not provided, or check if the provided one exists
-    if (!roomCode) {
-      roomCode = generateRoomCode();
-      console.log(`createGame: generated room code: ${roomCode}`);
-    } else {
-      // If room exists, check if we can take it over
-      if (gameStates[roomCode]) {
-        console.log(`createGame: room ${roomCode} already exists`);
-        
-        // Check if the host is disconnected
-        const game = gameStates[roomCode];
-        const hostSocketId = game.hostId || game.host;
-        
-        // If we have a socket id for the host, check if they're still connected
-        if (hostSocketId) {
-          const hostSocket = io.sockets.sockets.get(hostSocketId);
-          
-          if (hostSocket && hostSocket.connected) {
-            console.log(`createGame: room ${roomCode} already has connected host ${hostSocketId}`);
-            socket.emit('error', { message: `Room ${roomCode} already exists and has a host` });
-            return;
-          }
+      if (typeof data === 'string') {
+        playerName = data;
+        console.log('createGame: received string parameter:', playerName);
+      } else if (typeof data === 'object') {
+        if (data.playerName) {
+          playerName = data.playerName;
+          console.log('createGame: received object parameter with playerName:', playerName);
         }
         
-        console.log(`createGame: taking over room ${roomCode} as new host`);
+        if (data.roomCode) {
+          roomCode = data.roomCode.toUpperCase();
+          console.log('createGame: received roomCode in parameter:', roomCode);
+        }
+        
+        if (data.yearRange) {
+          yearRange = data.yearRange;
+          console.log('createGame: received yearRange parameter:', yearRange);
+        }
       }
-    }
-    
-    // Extract game date if provided
-    const gameDate = typeof data === 'object' && data.gameDate ? data.gameDate : null;
-    
-    // Get a random date from the specified year range
-    const gameDateTime = gameDate || jeopardyDB.getRandomDate(yearRange);
-    
-    // Initialize game with current round
-    const game = {
-      roomCode: roomCode,
-      host: socket.id,
-      hostId: socket.id, // Keep both for backward compatibility  
-      players: [{
-        id: socket.id,
-        name: playerName,
-        score: 0,
-        isHost: true
-      }],
-      state: 'waiting',
-      gameState: 'waiting', // For backward compatibility
-      currentRound: GAME_ROUNDS.SINGLE_JEOPARDY, // Start with Single Jeopardy
-      roundsCompleted: [],
-      selectingPlayer: null,
-      currentQuestion: null,
-      startTime: Date.now(),
-      canBuzzIn: false,
-      earlyBuzzPenalties: {},
-      playerAttempts: {},
-      answeringTimeout: null,
-      questionTimeout: null,
-      gameDate: gameDateTime, // Use provided date, random date from year range, or overall random date
-      yearRange: yearRange, // Store year range for reference
-    };
-    
-    // Store the game
-    gameStates[roomCode] = game;
-    
-    // Join the socket to the room
-    socket.join(roomCode);
-    socket.roomCode = roomCode;
-    socket.playerName = playerName;
-    
-    console.log(`Game created by ${playerName} with room code ${roomCode}`);
-    
-    // Prepare response
-    const response = { 
-      roomCode,
-      hostName: playerName,
-      success: true,
-      game: {
+      
+      if (!playerName) {
+        playerName = 'Host';
+        console.log('createGame: using default playerName:', playerName);
+      }
+      
+      if (!yearRange) {
+        yearRange = { start: 1984, end: 2024 };
+        console.log('createGame: using default yearRange:', yearRange);
+      }
+      
+      // Generate a room code if not provided, or check if the provided one exists
+      if (!roomCode) {
+        roomCode = generateRoomCode();
+        console.log(`createGame: generated room code: ${roomCode}`);
+      } else {
+        // If room exists, check if we can take it over
+        if (gameStates[roomCode]) {
+          console.log(`createGame: room ${roomCode} already exists`);
+          
+          // Check if the host is disconnected
+          const game = gameStates[roomCode];
+          const hostSocketId = game.hostId || game.host;
+          
+          // If we have a socket id for the host, check if they're still connected
+          if (hostSocketId) {
+            const hostSocket = io.sockets.sockets.get(hostSocketId);
+            
+            if (hostSocket && hostSocket.connected) {
+              console.log(`createGame: room ${roomCode} already has connected host ${hostSocketId}`);
+              socket.emit('error', { message: `Room ${roomCode} already exists and has a host` });
+              return;
+            }
+          }
+          
+          console.log(`createGame: taking over room ${roomCode} as new host`);
+        }
+      }
+      
+      // Extract game date if provided
+      const gameDate = typeof data === 'object' && data.gameDate ? data.gameDate : null;
+      
+      // Get a random date from the specified year range
+      const gameDateTime = gameDate || jeopardyDB.getRandomDate(yearRange);
+      
+      console.log(`createGame: creating game with date ${gameDateTime}`);
+      
+      // Initialize game with current round
+      const game = {
+        roomCode: roomCode,
+        host: socket.id,
+        hostId: socket.id, // Keep both for backward compatibility  
+        players: [{
+          id: socket.id,
+          name: playerName,
+          score: 0,
+          isHost: true
+        }],
+        state: 'waiting',
+        gameState: 'waiting', // For backward compatibility
+        currentRound: GAME_ROUNDS.SINGLE_JEOPARDY, // Start with Single Jeopardy
+        roundsCompleted: [],
+        selectingPlayer: null,
+        currentQuestion: null,
+        startTime: Date.now(),
+        canBuzzIn: false,
+        earlyBuzzPenalties: {},
+        playerAttempts: {},
+        answeringTimeout: null,
+        questionTimeout: null,
+        gameDate: gameDateTime, // Use provided date, random date from year range, or overall random date
+        yearRange: yearRange, // Store year range for reference
+      };
+      
+      // Store the game
+      gameStates[roomCode] = game;
+      
+      // Join the socket to the room
+      socket.join(roomCode);
+      socket.roomCode = roomCode;
+      socket.playerName = playerName;
+      
+      console.log(`Game created by ${playerName} with room code ${roomCode}`);
+      
+      // Load game data from Jeopardy dataset if needed
+      try {
+        // Create the game board by setting up categories and questions
+        await setupGameBoard(roomCode);
+        console.log(`Game board successfully created for room ${roomCode}`);
+      } catch (setupError) {
+        console.error(`Error setting up game board for room ${roomCode}:`, setupError);
+        
+        // Notify the client about the error but don't terminate
+        socket.emit('error', { 
+          message: `Game created but failed to setup board: ${setupError.message}`,
+          gameCreated: true
+        });
+      }
+      
+      // Prepare response
+      const response = { 
         roomCode,
-        hostId: socket.id,
         hostName: playerName,
-        gameState: 'waiting',
-        players: gameStates[roomCode].players
-      }
-    };
-    
-    console.log('Emitting gameCreated event with response:', response);
-    
-    // Send the room code back to the host
-    socket.emit('gameCreated', response);
+        success: true,
+        game: {
+          roomCode,
+          hostId: socket.id,
+          hostName: playerName,
+          gameState: 'waiting',
+          players: gameStates[roomCode].players
+        }
+      };
+      
+      console.log('Emitting gameCreated event with response:', response);
+      
+      // Send the room code back to the host
+      socket.emit('gameCreated', response);
+    } catch (error) {
+      console.error('Error in createGame socket handler:', error);
+      socket.emit('error', { 
+        message: `Failed to create game: ${error.message}`, 
+        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined 
+      });
+    }
   });
   
   // Handle joining a game
@@ -558,17 +855,40 @@ io.on('connection', (socket) => {
           game.players[existingPlayerIndex].connected = true;
           
           // If this player was the buzzed player, update the reference
-          if (game.buzzedPlayer && game.buzzedPlayer.id === game.players[existingPlayerIndex].id) {
+          if (game.buzzedPlayer && game.buzzedPlayer.name === playerName) {
             game.buzzedPlayer = game.players[existingPlayerIndex];
           }
           
           // If this player was the selecting player, update the reference
-          if (game.selectingPlayer && game.selectingPlayer.id === game.players[existingPlayerIndex].id) {
+          if (game.selectingPlayer && game.selectingPlayer.name === playerName) {
             game.selectingPlayer = game.players[existingPlayerIndex];
           }
         } else {
           console.log(`Player name ${playerName} is already taken in game ${roomCode}`);
-          return socket.emit('error', { message: 'Player name already taken' });
+          
+          // Check if the player with this name is actually disconnected but not marked as such
+          const existingPlayer = game.players[existingPlayerIndex];
+          const existingSocketId = existingPlayer.id;
+          const existingSocket = io.sockets.sockets.get(existingSocketId);
+          
+          if (!existingSocket || !existingSocket.connected) {
+            console.log(`Player ${playerName} appears to be disconnected but not marked as such. Allowing rejoin.`);
+            
+            // Force update the player's connection status and socket ID
+            existingPlayer.id = socket.id;
+            existingPlayer.connected = true;
+            
+            // Update references if needed
+            if (game.buzzedPlayer && game.buzzedPlayer.name === playerName) {
+              game.buzzedPlayer = existingPlayer;
+            }
+            if (game.selectingPlayer && game.selectingPlayer.name === playerName) {
+              game.selectingPlayer = existingPlayer;
+            }
+          } else {
+            // The player is truly connected - reject the new connection
+            return socket.emit('error', { message: 'Player name already taken' });
+          }
         }
       } else {
         // Add the new player to the game
@@ -630,7 +950,7 @@ io.on('connection', (socket) => {
       });
     } catch (error) {
       console.error('Error joining game:', error);
-      socket.emit('error', { message: 'Failed to join game' });
+      socket.emit('error', { message: `Failed to join game: ${error.message}` });
     }
   });
   
@@ -1991,133 +2311,6 @@ io.on('connection', (socket) => {
         delete gameStates[roomCode];
       }
     }, 60 * 60 * 1000); // 1 hour
-  }
-
-  // Function to set up the game board for a specific game
-  async function setupGameBoard(roomCode) {
-    const gameState = gameStates[roomCode];
-    
-    if (!gameState) {
-      console.error(`Game state not found for room ${roomCode}`);
-      return;
-    }
-    
-    try {
-      // Get all available categories - always use in-memory dataset
-      const allCategories = getCategories();
-      
-      // Optional filtering by year range
-      let filteredCategories = allCategories;
-      if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
-        // Filter in-memory dataset by year range
-        const startYear = parseInt(gameState.yearRange.start);
-        const endYear = parseInt(gameState.yearRange.end);
-        
-        // Get filtered questions by year range
-        const filteredQuestions = getQuestionsByYearRange(startYear, endYear);
-        
-        // Extract unique categories from filtered dataset
-        const uniqueCategories = new Set();
-        filteredQuestions.forEach(q => uniqueCategories.add(q.category));
-        filteredCategories = Array.from(uniqueCategories).map(category => ({ category }));
-      }
-      
-      // Randomly select 6 categories
-      const shuffledCategories = filteredCategories.sort(() => 0.5 - Math.random());
-      const selectedCategories = shuffledCategories.slice(0, 6);
-      
-      // Store selected categories
-      gameState.categories = selectedCategories.map(c => c.category);
-      
-      // Initialize board with empty questions
-      gameState.board = {};
-      
-      // Populate board with questions for each category
-      for (const category of gameState.categories) {
-        // Get questions from in-memory dataset
-        let categoryQuestions = getQuestionsByCategory(category);
-        
-        // Apply year range filter if needed
-        if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
-          const startYear = parseInt(gameState.yearRange.start);
-          const endYear = parseInt(gameState.yearRange.end);
-          
-          categoryQuestions = categoryQuestions.filter(q => {
-            if (!q.air_date) return false;
-            const year = new Date(q.air_date).getFullYear();
-            return year >= startYear && year <= endYear;
-          });
-        }
-        
-        // Filter by round
-        categoryQuestions = categoryQuestions.filter(q => q.round === gameState.round);
-        
-        // Sort by value and select 5 questions (or fewer if not enough available)
-        categoryQuestions.sort((a, b) => a.clue_value - b.clue_value);
-        
-        // If not enough questions, we'll need to adapt
-        gameState.board[category] = [];
-        
-        // Add questions to the board
-        for (let i = 0; i < 5; i++) {
-          const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
-          
-          // Find a suitable question with appropriate value
-          const suitableQuestions = categoryQuestions.filter(q => 
-            q.clue_value === value || (q.clue_value === 0 && q.round === gameState.round)
-          );
-          
-          if (suitableQuestions.length > 0) {
-            // Randomly select one question
-            const question = suitableQuestions[Math.floor(Math.random() * suitableQuestions.length)];
-            
-            // Mark one random question as a daily double
-            const isDaily = 
-              (gameState.round === 1 && Math.random() < 0.05 && !gameState.board.dailyDouble) ||
-              (gameState.round === 2 && Math.random() < 0.1 && gameState.board.dailyDoubleCount < 2);
-            
-            if (isDaily) {
-              if (gameState.round === 1) {
-                gameState.board.dailyDouble = `${category}-${value}`;
-              } else {
-                if (!gameState.board.dailyDoubleCount) gameState.board.dailyDoubleCount = 0;
-                gameState.board.dailyDoubleCount++;
-                
-                if (gameState.board.dailyDouble) {
-                  gameState.board.dailyDouble2 = `${category}-${value}`;
-                } else {
-                  gameState.board.dailyDouble = `${category}-${value}`;
-                }
-              }
-            }
-            
-            gameState.board[category].push({
-              id: question.id,
-              value,
-              question: question.answer, // Question is actually the clue shown to players
-              answer: question.question, // Answer is what players must respond with
-              revealed: false,
-              isDaily
-            });
-          } else {
-            // If no suitable question, create an empty slot
-            gameState.board[category].push({
-              id: null,
-              value,
-              question: "No question available",
-              answer: "No answer available",
-              revealed: true, // Mark as revealed so it can't be selected
-              isDaily: false
-            });
-          }
-        }
-      }
-      
-      console.log(`Game board created for room ${roomCode} with categories:`, gameState.categories);
-    } catch (error) {
-      console.error('Error setting up game board:', error);
-      throw error; // Propagate error to caller
-    }
   }
 });
 
