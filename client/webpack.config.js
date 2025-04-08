@@ -51,13 +51,18 @@ module.exports = {
   ],
   devServer: {
     historyApiFallback: true,
-    port: 3000,
-    proxy: {
-      '/api': 'http://localhost:5005',
-      '/socket.io': {
+    port: 3001,
+    host: '0.0.0.0',
+    hot: true,
+    allowedHosts: 'all',
+    proxy: [
+      {
+        context: ['/api', '/games', '/games/create', '/test-endpoint', '/socket.io'],
         target: 'http://localhost:5005',
+        secure: false,
+        changeOrigin: true,
         ws: true
       }
-    }
+    ]
   }
 }; 

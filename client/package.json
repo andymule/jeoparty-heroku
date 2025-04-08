@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "proxy": "http://localhost:5005",
   "scripts": {
-    "start": "DANGEROUSLY_DISABLE_HOST_CHECK=true PORT=3001 react-scripts start",
+    "start": "webpack serve --mode development --port 3001 --host 0.0.0.0 --open false --hot",
+    "start:react": "cross-env PORT=3001 BROWSER=none WDS_SOCKET_HOST=localhost WDS_SOCKET_PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"

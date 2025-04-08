@@ -8,7 +8,12 @@
     "build:client": "cd client && npm run build",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm start",
-    "dev": "npm run build:client && concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "concurrently --kill-others-on-fail --names \"SERVER,CLIENT\" --prefix-colors \"green,blue\" \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:react": "concurrently --kill-others-on-fail --names \"SERVER,CLIENT\" --prefix-colors \"green,blue\" \"npm run dev:server\" \"cd client && npm run start:react\"",
+    "dev:clean": "npm run clean && npm run dev",
+    "clean": "pkill -f node || true",
+    "restart": "npm run clean && cd server && npm run dev",
+    "dev:build": "npm run build:client && npm run dev",
     "build": "cd client && npm run build",
     "heroku-postbuild": "NPM_CONFIG_PRODUCTION=false npm install --prefix client && npm run build --prefix client"
   },
