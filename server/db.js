@@ -14,11 +14,21 @@ const loadDatasetIntoMemory = () => {
       throw new Error(`Dataset file not found at ${datasetPath}`);
     }
     
+    const isProduction = process.env.NODE_ENV === 'production';
+    // In production (Heroku), limit to 10,000 questions to avoid memory issues
+    const maxQuestionsInProduction = 10000;
+    
     const data = fs.readFileSync(datasetPath, 'utf8');
     const lines = data.split('\n');
     
     // Skip header row
+    let loadedCount = 0;
     for (let i = 1; i < lines.length; i++) {
+      if (isProduction && loadedCount >= maxQuestionsInProduction) {
+        console.log(`Reached limit of ${maxQuestionsInProduction} questions for production environment`);
+        break;
+      }
+      
       const line = lines[i].trim();
       if (!line) continue;
       
@@ -44,6 +54,8 @@ const loadDatasetIntoMemory = () => {
           air_date: values[7] || null,
           notes: values.length > 8 ? values[8] : ''
         });
+        
+        loadedCount++;
       } catch (lineError) {
         console.warn(`Error parsing line ${i}: ${lineError.message}`);
       }
