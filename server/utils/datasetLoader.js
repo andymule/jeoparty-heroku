@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 const { parse } = require('csv-parse/sync');
 
 class JeopardyDataset {
@@ -62,7 +63,9 @@ const dataset = new JeopardyDataset();
 
 module.exports = {
   loadDataset: () => {
-    const success = dataset.loadFromFile(path.join(__dirname, '../../data/combined_season1-40.tsv'));
+    const datasetPath = path.join(__dirname, '../../data/combined_season1-40.tsv');
+    console.log('Loading dataset from:', datasetPath);
+    const success = dataset.loadFromFile(datasetPath);
     if (!success) {
       throw new Error('Failed to load dataset');
     }
