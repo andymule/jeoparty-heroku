@@ -28,7 +28,7 @@ const loadDatasetIntoMemory = () => {
         const values = splitTsvLine(line);
         
         if (values.length < 7) {
-          console.warn(`Skipping line ${i}: insufficient columns (${values.length})`);
+          // console.warn(`Skipping line ${i}: insufficient columns (${values.length})`);
           continue;
         }
         
