@@ -1,23 +1,17 @@
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 module.exports = function(app) {
+  // Forward all /api/* requests to the server
   app.use(
     '/api',
     createProxyMiddleware({
       target: 'http://localhost:5005',
       changeOrigin: true,
+      pathRewrite: { '^/api': '/api' }, // Don't rewrite the path
     })
   );
   
-  // Handle direct /games endpoint for compatibility
-  app.use(
-    '/games',
-    createProxyMiddleware({
-      target: 'http://localhost:5005',
-      changeOrigin: true,
-    })
-  );
-  
+  // Forward all /socket.io requests to the server
   app.use(
     '/socket.io',
     createProxyMiddleware({
