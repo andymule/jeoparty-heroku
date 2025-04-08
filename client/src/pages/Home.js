@@ -247,7 +247,7 @@ const Home = () => {
       
       // Create game with API
       const response = await axios.post('/api/games/create', {
-        playerName: playerName.trim(),
+        hostName: playerName.trim(),
         gameDate: selectedDate,
         yearRange: yearRange // Include the year range
       });

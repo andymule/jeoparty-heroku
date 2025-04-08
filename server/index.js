@@ -444,17 +444,23 @@ app.post('/api/games', async (req, res) => {
 
 // Add compatibility endpoint for /api/games/create
 app.post('/api/games/create', async (req, res) => {
-  console.log('POST /api/games/create - Redirecting to /api/games:', req.body);
+  console.log('POST /api/games/create - Request received:', req.body);
   try {
     // Forward to the main endpoint
-    const { hostName, yearRange, gameDate } = req.body;
+    const { hostName, playerName, yearRange, gameDate } = req.body;
     
-    if (!hostName) {
+    // Check if we have a valid name parameter
+    const nameToUse = hostName || playerName;
+    
+    if (!nameToUse) {
+      console.error('POST /api/games/create - Missing required name parameter. Request body:', req.body);
       return res.status(400).json({ 
-        error: 'Host name is required',
+        error: 'Host name or player name is required',
         requestBody: req.body 
       });
     }
+    
+    console.log(`POST /api/games/create - Creating game with name: ${nameToUse}`);
     
     // Create a new game state
     const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
@@ -462,7 +468,7 @@ app.post('/api/games/create', async (req, res) => {
     gameStates[roomCode] = {
       roomCode,
       hostId: null,
-      hostName,
+      hostName: nameToUse,
       players: [],
       currentState: 'waiting',
       board: null,
