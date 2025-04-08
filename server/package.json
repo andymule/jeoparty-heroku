@@ -10,7 +10,8 @@
     "test": "jest --detectOpenHandles",
     "test:api": "jest api.test.js --detectOpenHandles",
     "test:flow": "jest game-flow.test.js --detectOpenHandles",
-    "test:debug": "node ./tests/debug-api.js"
+    "test:debug": "node ./tests/debug-api.js",
+    "postinstall": "npm list express || npm install express"
   },
   "keywords": [
     "jeopardy",
