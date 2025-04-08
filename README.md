@@ -49,7 +49,7 @@ A multiplayer Jeopardy-style game where a host displays the game board on a desk
 
 1. Start the server and client:
    ```
-      npm run dev
+   npm run dev
    ```
 
 2. Access the application:
@@ -91,4 +91,4 @@ The Jeoparty application loads the entire Jeopardy clue dataset (combined_season
 
 ## Acknowledgements
 
-- [jwolle1/jeopardy_clue_dataset](https://github.com/jwolle1/jeopardy_clue_dataset) for the comprehensive Jeopardy questions database
+- [jwolle1/jeopardy_clue_dataset](https://github.com/jwolle1/jeopardy_clue_dataset) for the comprehensive Jeopardy questions dataset

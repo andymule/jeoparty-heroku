@@ -1,99 +1,87 @@
-# Jeoparty Quickstart Guide
+# Quick Start Guide
 
-This guide will help you get Jeoparty up and running on your local machine quickly.
+## Prerequisites
 
-## Quick Setup
+- Node.js (v14 or higher)
+- npm (comes with Node.js)
 
-### 1. Clone the repository
+## Setup Instructions
+
+### 1. Clone the Repository
 
 ```bash
 git clone <repository-url>
 cd jeoparty
 ```
 
-### 2. Install dependencies
-
-Install all dependencies at once:
+### 2. Install Dependencies
 
 ```bash
+# Install server dependencies
+cd server
 npm install
-cd client && npm install && cd ..
-cd server && npm install && cd ..
+
+# Install client dependencies
+cd ../client
+npm install
 ```
 
-### 3. Set up the database
+### 3. Configure Environment
 
-Create a PostgreSQL database:
+Create a `.env` file in the server directory with the following content:
 
-```bash
-# Using psql
-psql -U postgres
-CREATE DATABASE jeoparty;
-\q
-```
-
-Or using another PostgreSQL admin tool of your choice.
-
-Update the `.env` file with your database credentials:
-
-```
-NODE_ENV=development
+```env
 PORT=5000
-DATABASE_URL=postgresql://username:password@localhost:5432/jeoparty
+NODE_ENV=development
 ```
 
-Replace `username` and `password` with your PostgreSQL credentials.
+### 4. Start the Application
 
-### 4. Start development servers
-
-This will start both the backend server and the React development server:
+From the root directory, run:
 
 ```bash
 npm run dev
 ```
 
-### 5. Access the application
+This will start both the server and client in development mode.
 
-- Host view (game board): http://localhost:3000
-- Player view (buzzer): Open http://localhost:3000 on your mobile device
+### 5. Access the Application
 
-## Playing the Game
-
-1. **Create a Game**: On a desktop/laptop, create a new game by entering your name and clicking "Create Game"
-2. **Join the Game**: On mobile devices, enter the room code displayed on the host screen
-3. **Start the Game**: The host can start the game once players have joined
-4. **Select Questions**: The host selects questions from the board
-5. **Buzz In**: Players use their mobile devices to buzz in when they know the answer
-6. **Answer**: The first player to buzz in can submit their answer by typing or speaking
-7. **Judge**: The host judges the answer as correct or incorrect
+- Main game board (host): http://localhost:3000
+- Connect players by sharing the room code displayed on the host screen
 
 ## Troubleshooting
 
-### Database Issues
+### Common Issues
 
-If you encounter database issues:
+1. **Port Already in Use**
+   If you see an error about the port being in use:
+   ```bash
+   # Find the process using the port
+   lsof -i :5000
+   
+   # Kill the process (replace PID with the actual process ID)
+   kill -9 PID
+   ```
 
-```bash
-# Check if the database is running
-psql -U postgres -d jeoparty -c "SELECT 1"
+2. **Missing Dependencies**
+   If you encounter dependency issues:
+   ```bash
+   # In both server and client directories
+   rm -rf node_modules
+   rm package-lock.json
+   npm install
+   ```
 
-# Manually initialize the database
-cd server
-node -e "require('./db').initializeDB()"
-```
+3. **Dataset Issues**
+   If you encounter issues with the dataset:
+   - Ensure the `data/combined_season1-40.tsv` file exists
+   - Check file permissions
+   - Verify the file is not corrupted
 
-### Connection Issues
+## Next Steps
 
-If mobile devices can't connect:
-
-1. Make sure your computer and mobile device are on the same network
-2. Try using your computer's local IP address instead of localhost
-3. Check if any firewall is blocking connections on port 3000 or 5000
-
-### Loading Questions
-
-If you want to load the full Jeopardy dataset:
-
-1. Download from https://github.com/jwolle1/jeopardy_clue_dataset
-2. Place the TSV file in the `data` directory
-3. Run: `cd server && npm run import-data` 
+- [ ] Create a game room
+- [ ] Invite players to join
+- [ ] Start a new game
+- [ ] Enjoy playing Jeoparty! 
