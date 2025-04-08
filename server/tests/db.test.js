@@ -1,85 +1,76 @@
-// Use jest.mock to mock the entire db module
-jest.mock('../db', () => require('./mock-db'));
-
-// Import the mock database module
-const { initializeDB, pool } = require('../db');
-
-// Mock pg-promise and other modules
-jest.mock('pg-promise', () => {
-  // Create a mock for helpers.ColumnSet and helpers.insert
-  const helpers = {
-    ColumnSet: jest.fn(),
-    insert: jest.fn()
-  };
-  
-  // Return a mock pg-promise function
-  return jest.fn(() => ({
-    helpers,
-    none: jest.fn()
-  }));
-});
-
-jest.mock('pg', () => {
-  const mockPool = {
-    query: jest.fn(),
-    on: jest.fn(),
-    end: jest.fn()
-  };
-  
-  return {
-    Pool: jest.fn(() => mockPool)
-  };
-});
-
+// Mock modules
 jest.mock('fs', () => ({
-  existsSync: jest.fn(),
-  readFileSync: jest.fn()
+  existsSync: jest.fn().mockReturnValue(true),
+  readFileSync: jest.fn().mockReturnValue('1\tValue\t0\tCategory\tComments\tAnswer\tQuestion\t2021-01-01\tNotes')
 }));
+
+// Import the module to test
+const db = require('../db');
 
 describe('Database Module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
-  
-  test('should create tables if they do not exist', async () => {
-    // Mock query to return 0 questions
-    pool.query.mockImplementationOnce(() => ({
-      rows: [{ count: '0' }]
-    }));
-    
-    await initializeDB();
-    
-    // First call should create the table
-    expect(pool.query.mock.calls[0][0]).toContain('CREATE TABLE IF NOT EXISTS questions');
-    
-    // Second call should check for existing questions
-    expect(pool.query.mock.calls[1][0]).toBe('SELECT COUNT(*) as count FROM questions');
-    
-    // Third call should be the insert query
-    expect(pool.query).toHaveBeenCalledTimes(3);
+
+  test('initializeDataset loads data correctly', async () => {
+    await expect(db.initializeDataset()).resolves.toBe(true);
+    expect(db.inMemoryDataset.length).toBeGreaterThan(0);
   });
-  
-  test('should not insert sample data if questions already exist', async () => {
-    // Override the mockImplementation for this test only to return count > 0
-    const originalMockImplementation = pool.query.mockImplementation;
-    
-    // Set a specific implementation for this test
-    pool.query.mockImplementation((query) => {
-      if (query.includes('SELECT COUNT(*) as count FROM questions')) {
-        return { rows: [{ count: '5' }] };
-      }
-      return { rows: [] };
-    });
-    
-    await initializeDB();
-    
-    // Should have called query with create table
-    expect(pool.query.mock.calls[0][0]).toContain('CREATE TABLE IF NOT EXISTS questions');
-    
-    // Should have called query with count check
-    expect(pool.query.mock.calls[1][0]).toBe('SELECT COUNT(*) as count FROM questions');
-    
-    // Should not call query a third time to insert data
-    expect(pool.query.mock.calls.length).toBe(2);
+
+  test('getQuestionsCount returns correct count', () => {
+    db.inMemoryDataset = [{ id: 1 }, { id: 2 }];
+    expect(db.getQuestionsCount()).toBe(2);
+  });
+
+  test('getCategories returns unique categories', () => {
+    db.inMemoryDataset = [
+      { category: 'Category A' },
+      { category: 'Category B' },
+      { category: 'Category A' }
+    ];
+    const categories = db.getCategories();
+    expect(categories.length).toBe(2);
+    expect(categories[0].category).toBe('Category A');
+    expect(categories[1].category).toBe('Category B');
+  });
+
+  test('getQuestionsByCategory returns filtered questions', () => {
+    db.inMemoryDataset = [
+      { category: 'Category A', question: 'Q1' },
+      { category: 'Category B', question: 'Q2' },
+      { category: 'Category A', question: 'Q3' }
+    ];
+    const questions = db.getQuestionsByCategory('Category A');
+    expect(questions.length).toBe(2);
+    expect(questions[0].question).toBe('Q1');
+    expect(questions[1].question).toBe('Q3');
+  });
+
+  test('getRandomQuestionsByCategory returns random questions', () => {
+    db.inMemoryDataset = [
+      { category: 'Category A', round: 1, question: 'Q1' },
+      { category: 'Category A', round: 1, question: 'Q2' },
+      { category: 'Category A', round: 1, question: 'Q3' },
+      { category: 'Category A', round: 2, question: 'Q4' }
+    ];
+    const questions = db.getRandomQuestionsByCategory('Category A', 1, 2);
+    expect(questions.length).toBe(2);
+    expect(questions[0].category).toBe('Category A');
+    expect(questions[1].category).toBe('Category A');
+    expect(questions[0].round).toBe(1);
+    expect(questions[1].round).toBe(1);
+  });
+
+  test('getQuestionsByYearRange returns questions within range', () => {
+    db.inMemoryDataset = [
+      { air_date: '2018-01-01', question: 'Q1' },
+      { air_date: '2019-01-01', question: 'Q2' },
+      { air_date: '2020-01-01', question: 'Q3' },
+      { air_date: '2021-01-01', question: 'Q4' }
+    ];
+    const questions = db.getQuestionsByYearRange(2019, 2020);
+    expect(questions.length).toBe(2);
+    expect(questions[0].question).toBe('Q2');
+    expect(questions[1].question).toBe('Q3');
   });
 }); 

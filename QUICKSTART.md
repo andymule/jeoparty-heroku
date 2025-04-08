@@ -1,99 +1,89 @@
-# Jeoparty Quickstart Guide
+# Jeoparty Quick Start Guide
 
-This guide will help you get Jeoparty up and running on your local machine quickly.
+This guide will help you set up and run the Jeoparty application locally.
 
-## Quick Setup
+## Prerequisites
 
-### 1. Clone the repository
+- Node.js 18.x or higher
+- npm 9.x or higher
+- Git
+
+## Installation
+
+1. Clone the repository:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/yourusername/jeoparty.git
 cd jeoparty
 ```
 
-### 2. Install dependencies
-
-Install all dependencies at once:
+2. Install dependencies:
 
 ```bash
 npm install
-cd client && npm install && cd ..
-cd server && npm install && cd ..
+cd client && npm install
+cd ../server && npm install
+cd ..
 ```
 
-### 3. Set up the database
+## Environment Setup
 
-Create a PostgreSQL database:
+1. Create `.env.development` files:
 
+Server:
 ```bash
-# Using psql
-psql -U postgres
-CREATE DATABASE jeoparty;
-\q
-```
-
-Or using another PostgreSQL admin tool of your choice.
-
-Update the `.env` file with your database credentials:
-
-```
+# server/.env.development
+PORT=5005
 NODE_ENV=development
-PORT=5000
-DATABASE_URL=postgresql://username:password@localhost:5432/jeoparty
+CORS_ORIGIN=http://localhost:3001
 ```
 
-Replace `username` and `password` with your PostgreSQL credentials.
+Client:
+```bash
+# client/.env.development
+REACT_APP_SERVER_URL=http://localhost:5005
+PORT=3001
+```
 
-### 4. Start development servers
+## Running the Application
 
-This will start both the backend server and the React development server:
+1. Start the application in development mode:
 
 ```bash
 npm run dev
 ```
 
-### 5. Access the application
+This will start both the server and client concurrently.
 
-- Host view (game board): http://localhost:3000
-- Player view (buzzer): Open http://localhost:3000 on your mobile device
+- Server will run on: http://localhost:5005
+- Client will run on: http://localhost:3001
 
 ## Playing the Game
 
-1. **Create a Game**: On a desktop/laptop, create a new game by entering your name and clicking "Create Game"
-2. **Join the Game**: On mobile devices, enter the room code displayed on the host screen
-3. **Start the Game**: The host can start the game once players have joined
-4. **Select Questions**: The host selects questions from the board
-5. **Buzz In**: Players use their mobile devices to buzz in when they know the answer
-6. **Answer**: The first player to buzz in can submit their answer by typing or speaking
-7. **Judge**: The host judges the answer as correct or incorrect
+1. Open http://localhost:3001 in your desktop browser to create a new game.
+2. After creating a game, you'll receive a game code.
+3. Open http://localhost:3001 in a mobile browser or another tab, and enter the game code to join as a player.
+4. Once all players have joined, start the game from the host view.
+
+## Testing
+
+To run tests:
+
+```bash
+cd server && npm test
+```
 
 ## Troubleshooting
 
-### Database Issues
+- If you encounter port conflicts, you can modify the port values in the `.env.development` files.
+- If the client cannot connect to the server, ensure the `REACT_APP_SERVER_URL` in client's `.env.development` matches the server's address.
 
-If you encounter database issues:
+## Viewing the Jeoparty Dataset
 
-```bash
-# Check if the database is running
-psql -U postgres -d jeoparty -c "SELECT 1"
+The Jeoparty dataset is loaded into memory from `data/combined_season1-40.tsv` at server startup.
 
-# Manually initialize the database
-cd server
-node -e "require('./db').initializeDB()"
-```
+## Additional Scripts
 
-### Connection Issues
-
-If mobile devices can't connect:
-
-1. Make sure your computer and mobile device are on the same network
-2. Try using your computer's local IP address instead of localhost
-3. Check if any firewall is blocking connections on port 3000 or 5000
-
-### Loading Questions
-
-If you want to load the full Jeopardy dataset:
-
-1. Download from https://github.com/jwolle1/jeopardy_clue_dataset
-2. Place the TSV file in the `data` directory
-3. Run: `cd server && npm run import-data` 
+- `npm run build`: Build the client for production
+- `npm run dev:clean`: Clean up running Node.js processes and restart the development servers
+- `npm start`: Start the production server (after building) 
