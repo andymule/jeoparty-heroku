@@ -1,7 +1,7 @@
 ---
-description: 
+description: technical overview for heroku and local testing, and game rules for jeopardy
 globs: 
-alwaysApply: true
+alwaysApply: false
 ---
 You're a heroku expert. I want to make a web app on heroku that is a jeopardy game. This should have jeopardy, double jeopardy, and final jeopardy rounds just like the show. If a client is connecting with a desktop client, they get the main game board. If connecting with mobile device you get a buzzer and answering device. We use a downloaded jeopardy database of almost every historical game ever played. Try to make everything run through "npm run dev" for local testing, and make sure we set up a good testing and deployment pipeline for releasing for public use on heroku.
 

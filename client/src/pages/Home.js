@@ -245,12 +245,14 @@ const Home = () => {
       
       setDebug('Sending create game request...');
       
-      // Create game with API - ensure path starts with /api
+      // Use the correct API endpoint that exists on the server
       const response = await axios.post('/api/games/create', {
         hostName: playerName.trim(),
         gameDate: selectedDate,
         yearRange: yearRange // Include the year range
       });
+      
+      console.log('API response:', response);
       
       if (response.data.roomCode) {
         console.log('Game created successfully:', response.data);
