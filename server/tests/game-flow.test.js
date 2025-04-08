@@ -9,8 +9,8 @@ describe('Game Flow Integration Tests', () => {
   // This is a longer test suite that tests the entire game flow
   
   // Configuration for test
-  const API_URL = process.env.TEST_API_URL || 'http://localhost:5000';
-  const SOCKET_URL = process.env.TEST_SOCKET_URL || 'http://localhost:5000';
+  const API_URL = process.env.TEST_API_URL || 'http://localhost:5005/api';
+  const SOCKET_URL = process.env.TEST_SOCKET_URL || 'http://localhost:5005';
   let request;
   
   beforeAll(() => {

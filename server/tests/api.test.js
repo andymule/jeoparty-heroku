@@ -17,8 +17,12 @@ jest.mock('../db', () => {
 // Import the mocked database
 const { pool } = require('../db');
 
+// Update the API URL to use port 5005 instead of 5000
+const API_URL = process.env.TEST_API_URL || 'http://localhost:5005';
+
 describe('API Endpoints', () => {
   let app, server, agent;
+  let request;
   
   beforeAll((done) => {
     // Create a minimal Express app for testing
@@ -112,6 +116,7 @@ describe('API Endpoints', () => {
     // Start server
     server.listen(0, () => {
       agent = supertest(server);
+      request = supertest(API_URL);
       done();
     });
   });
@@ -144,7 +149,7 @@ describe('API Endpoints', () => {
   });
   
   test('POST /api/games/create should create a new game with correct Content-Type', async () => {
-    const response = await agent
+    const response = await request
       .post('/api/games/create')
       .set('Content-Type', 'application/json')
       .send({ playerName: 'TestHost' });
@@ -157,7 +162,7 @@ describe('API Endpoints', () => {
   });
   
   test('POST /api/games/create should fail with incorrect Content-Type', async () => {
-    const response = await agent
+    const response = await request
       .post('/api/games/create')
       .set('Content-Type', 'text/plain')
       .send('playerName=TestHost');
