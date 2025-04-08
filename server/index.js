@@ -37,7 +37,25 @@ dotenv.config();
 
 // Initialize Express app
 const app = express();
-app.use(cors());
+
+// Configure CORS
+const corsOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : '*';
+console.log('CORS Origins:', corsOrigins);
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow server-to-server requests (null origin)
+    if (!origin || corsOrigins === '*' || corsOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`CORS blocked request from origin: ${origin}`);
+      callback(null, false);
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -185,8 +203,10 @@ function checkAnswerCorrectness(userAnswer, correctAnswer) {
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? '*' : 'http://localhost:3000',
-    methods: ['GET', 'POST']
+    origin: corsOrigins,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
   }
 });
 
@@ -446,7 +466,15 @@ app.post('/api/games', async (req, res) => {
 app.post('/api/games/create', async (req, res) => {
   console.log('POST /api/games/create - Request received:', req.body);
   try {
-    // Forward to the main endpoint
+    // Check if content type is correct
+    if (!req.is('application/json')) {
+      return res.status(400).json({
+        success: false,
+        error: 'Content-Type must be application/json'
+      });
+    }
+    
+    // Get parameters
     const { hostName, playerName, yearRange, gameDate } = req.body;
     
     // Check if we have a valid name parameter
@@ -455,6 +483,7 @@ app.post('/api/games/create', async (req, res) => {
     if (!nameToUse) {
       console.error('POST /api/games/create - Missing required name parameter. Request body:', req.body);
       return res.status(400).json({ 
+        success: false,
         error: 'Host name or player name is required',
         requestBody: req.body 
       });
@@ -467,10 +496,16 @@ app.post('/api/games/create', async (req, res) => {
     
     gameStates[roomCode] = {
       roomCode,
-      hostId: null,
+      hostId: `api-${Date.now()}`,
       hostName: nameToUse,
-      players: [],
+      players: [{
+        id: `api-${Date.now()}`,
+        name: nameToUse,
+        score: 0,
+        isHost: true
+      }],
       currentState: 'waiting',
+      gameState: 'waiting',
       board: null,
       categories: [],
       selectedQuestion: null,
@@ -492,17 +527,24 @@ app.post('/api/games/create', async (req, res) => {
       console.log(`Game board successfully created for room ${roomCode}`);
     } catch (setupError) {
       console.error(`Error setting up game board for room ${roomCode}:`, setupError);
-      return res.status(500).json({ error: `Failed to setup game board: ${setupError.message}` });
+      return res.status(500).json({
+        success: false, 
+        error: `Failed to setup game board: ${setupError.message}` 
+      });
     }
     
     console.log(`Game successfully created with room code ${roomCode}`);
     res.json({
+      success: true,
       roomCode,
-      gameState: gameStates[roomCode]
+      hostUrl: `/game/host/${roomCode}`,
+      playerUrl: `/game/player/${roomCode}`,
+      game: gameStates[roomCode]
     });
   } catch (error) {
     console.error('Error creating game via /api/games/create:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to create game', 
       details: error.message,
       stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
@@ -2331,8 +2373,49 @@ initializeDataset().then(() => {
 // Start the server
 const PORT = process.env.PORT || 5005;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-}); 
+  const isDev = process.env.NODE_ENV !== 'production';
+  console.log(`Jeoparty Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+  
+  if (isDev) {
+    console.log('');
+    console.log('=========================================================');
+    console.log('🎮 Jeoparty Development Server');
+    console.log('=========================================================');
+    console.log('');
+    console.log('🔗 API URLs:');
+    console.log(`   • Local:            http://localhost:${PORT}/api`);
+    console.log(`   • On Your Network:  http://${getLocalIp()}:${PORT}/api`);
+    console.log('');
+    console.log('🌐 Access the game:');
+    console.log(`   • Host (Desktop):   http://localhost:3001/`);
+    console.log(`   • Player (Mobile):  http://${getLocalIp()}:3001/`);
+    console.log('');
+    console.log('📊 Test API Status:');
+    console.log(`   • curl http://localhost:${PORT}/api/status`);
+    console.log('');
+    console.log('⚠️  Make sure both server and client are running:');
+    console.log('   • Server: npm run dev:server');
+    console.log('   • Client: npm run dev:client');
+    console.log('   • Or both: npm run dev');
+    console.log('=========================================================');
+  }
+});
+
+// Helper function to get local IP for developer convenience
+function getLocalIp() {
+  const { networkInterfaces } = require('os');
+  const nets = networkInterfaces();
+  
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // Skip internal and non-IPv4 addresses
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return 'localhost'; // Fallback to localhost
+}
 
 // Add a dedicated test endpoint
 app.post('/test-endpoint', (req, res) => {

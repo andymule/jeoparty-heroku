@@ -22,21 +22,31 @@ const loadDatasetIntoMemory = () => {
       const line = lines[i].trim();
       if (!line) continue;
       
-      const values = line.split('\t');
-      if (values.length < 9) continue;
-      
-      inMemoryDataset.push({
-        id: i,
-        round: parseInt(values[0]) || 0,
-        clue_value: parseInt(values[1]) || 0,
-        daily_double_value: parseInt(values[2]) || 0,
-        category: values[3],
-        comments: values[4] || '',
-        answer: values[5], // This is the clue shown to contestants
-        question: values[6], // This is what contestants must respond with
-        air_date: values[7] || null,
-        notes: values[8] || ''
-      });
+      try {
+        // Handle TSV with potential quotes by using a custom split
+        // This is more robust than a simple split('\t')
+        const values = splitTsvLine(line);
+        
+        if (values.length < 7) {
+          console.warn(`Skipping line ${i}: insufficient columns (${values.length})`);
+          continue;
+        }
+        
+        inMemoryDataset.push({
+          id: i,
+          round: parseInt(values[0]) || 0,
+          clue_value: parseInt(values[1]) || 0,
+          daily_double_value: parseInt(values[2]) || 0,
+          category: values[3] || 'Unknown Category',
+          comments: values[4] || '',
+          answer: values[5] || '', // This is the clue shown to contestants
+          question: values[6] || '', // This is what contestants must respond with
+          air_date: values[7] || null,
+          notes: values.length > 8 ? values[8] : ''
+        });
+      } catch (lineError) {
+        console.warn(`Error parsing line ${i}: ${lineError.message}`);
+      }
     }
     
     console.log(`Successfully loaded ${inMemoryDataset.length} questions into memory.`);
@@ -46,6 +56,39 @@ const loadDatasetIntoMemory = () => {
     throw error;
   }
 };
+
+// Helper function to split TSV line handling quoted fields
+function splitTsvLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  
+  // Special case for common patterns in our dataset
+  // If line doesn't contain quotes, use simple split for performance
+  if (!line.includes('"')) {
+    return line.split('\t');
+  }
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    
+    if (char === '"') {
+      // Toggle quote state
+      inQuotes = !inQuotes;
+    } else if (char === '\t' && !inQuotes) {
+      // End of field if not in quotes
+      result.push(current);
+      current = '';
+    } else {
+      // Add character to current field
+      current += char;
+    }
+  }
+  
+  // Add the last field
+  result.push(current);
+  return result;
+}
 
 // Functions to query the in-memory dataset
 const getQuestionsCount = () => {
