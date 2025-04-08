@@ -245,14 +245,14 @@ const Home = () => {
       
       setDebug('Sending create game request...');
       
-      // Create game with API
+      // Create game with API - ensure path starts with /api
       const response = await axios.post('/api/games/create', {
         hostName: playerName.trim(),
         gameDate: selectedDate,
         yearRange: yearRange // Include the year range
       });
       
-      if (response.data.success) {
+      if (response.data.roomCode) {
         console.log('Game created successfully:', response.data);
         navigate(`/game/host/${response.data.roomCode}`);
       } else {
@@ -261,7 +261,7 @@ const Home = () => {
       }
     } catch (err) {
       console.error('Error creating game:', err);
-      setError('Error creating game: ' + (err.response?.data?.message || 'Unknown error'));
+      setError('Error creating game: ' + (err.response?.data?.message || err.message || 'Unknown error'));
     } finally {
       setLoading(false);
     }

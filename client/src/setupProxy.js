@@ -9,6 +9,15 @@ module.exports = function(app) {
     })
   );
   
+  // Handle direct /games endpoint for compatibility
+  app.use(
+    '/games',
+    createProxyMiddleware({
+      target: 'http://localhost:5005',
+      changeOrigin: true,
+    })
+  );
+  
   app.use(
     '/socket.io',
     createProxyMiddleware({
