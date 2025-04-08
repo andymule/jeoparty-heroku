@@ -5,8 +5,11 @@ const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
 const { v4: uuidv4 } = require('uuid');
-const { stringSimilarity } = require('string-similarity-js');
+const stringSimilarity = require('string-similarity');
 const fs = require('fs');
+const natural = require('natural');
+const { WordTokenizer, PorterStemmer } = natural;
+const tokenizer = new WordTokenizer();
 
 // Load in-memory dataset module
 const { 
@@ -44,6 +47,22 @@ app.use((req, res, next) => {
   next();
 });
 
+// Function to sanitize clue text before displaying
+function sanitizeClue(clueText) {
+  if (!clueText) return clueText;
+  
+  // Remove content inside parentheses (often show commentary)
+  let sanitized = clueText.replace(/\([^)]*\)/g, '').trim();
+  
+  // Remove forward and backslashes
+  sanitized = sanitized.replace(/[/\\]/g, ' ').trim();
+  
+  // Clean up multiple spaces that might result from removals
+  sanitized = sanitized.replace(/\s+/g, ' ').trim();
+  
+  return sanitized;
+}
+
 // Function to check answer correctness with permissive matching
 function checkAnswerCorrectness(userAnswer, correctAnswer) {
   if (!userAnswer || !correctAnswer) return false;
@@ -52,13 +71,16 @@ function checkAnswerCorrectness(userAnswer, correctAnswer) {
   const normalizeAnswer = (answer) => {
     return answer.toString()
       .toLowerCase()
-      .replace(/[^\w\s]/g, '') // Remove punctuation
+      .replace(/[^\w\s]/g, '') // Remove ALL punctuation including \ / " ' etc.
       .replace(/\s+/g, ' ')    // Replace multiple spaces with a single space
       .trim();
   };
   
   const normalizedUserAnswer = normalizeAnswer(userAnswer);
   const normalizedCorrectAnswer = normalizeAnswer(correctAnswer);
+  
+  // Log for debugging
+  console.log(`Comparing: "${normalizedUserAnswer}" with "${normalizedCorrectAnswer}"`);
   
   // Exact match after normalization
   if (normalizedUserAnswer === normalizedCorrectAnswer) {
@@ -73,15 +95,44 @@ function checkAnswerCorrectness(userAnswer, correctAnswer) {
     return true;
   }
   
+  // Check if user answer contains the correct answer (with minimum length)
+  if (normalizedUserAnswer.includes(normalizedCorrectAnswer) && 
+      normalizedCorrectAnswer.length > 3) {
+    console.log('User answer contains the correct answer');
+    return true;
+  }
+  
+  // Tokenize and stem both answers for more robust comparison
+  const stemWord = (word) => PorterStemmer.stem(word);
+  const userTokens = tokenizer.tokenize(normalizedUserAnswer).map(stemWord);
+  const correctTokens = tokenizer.tokenize(normalizedCorrectAnswer).map(stemWord);
+  
+  // Check for matching stems
+  const userStemSet = new Set(userTokens);
+  const correctStemSet = new Set(correctTokens);
+  
+  // Calculate the percentage of matching stems
+  const intersection = [...correctStemSet].filter(stem => userStemSet.has(stem));
+  const matchPercentage = correctStemSet.size > 0 ? 
+    intersection.length / correctStemSet.size : 0;
+  
+  // If many stems match, it's probably correct
+  if (matchPercentage >= 0.7 && correctStemSet.size >= 2) {
+    console.log(`High stem match percentage: ${matchPercentage.toFixed(2)}`);
+    return true;
+  }
+  
   // Check if answer contains important keywords
   const correctWords = normalizedCorrectAnswer.split(' ');
   const userWords = normalizedUserAnswer.split(' ');
   
-  // If answer is short (1-2 words), check if user got the main word
-  if (correctWords.length <= 2 && userWords.some(word => 
-    correctWords.includes(word) && word.length > 3)) {
-    console.log('User got main word in a short answer');
-    return true;
+  // For short answers (1-2 words), check if user got the main word
+  if (correctWords.length <= 2) {
+    // If it's a very short answer, be more permissive
+    if (correctWords.some(word => userWords.includes(word) && word.length > 3)) {
+      console.log('User got main word in a short answer');
+      return true;
+    }
   }
   
   // For longer answers, count how many significant words match
@@ -94,12 +145,12 @@ function checkAnswerCorrectness(userAnswer, correctAnswer) {
     }
   }
   
-  // Use string similarity algorithm for fuzzy matching
-  const similarity = stringSimilarity(normalizedUserAnswer, normalizedCorrectAnswer);
+  // Use string similarity for fuzzy matching - use the better library
+  const similarity = stringSimilarity.compareTwoStrings(normalizedUserAnswer, normalizedCorrectAnswer);
   console.log(`String similarity score: ${similarity}`);
   
-  // Permissive threshold - 0.7 means answers are 70% similar
-  if (similarity >= 0.7) {
+  // More permissive threshold - 0.65 means answers are 65% similar
+  if (similarity >= 0.65) {
     console.log('Answer is very similar');
     return true;
   }
@@ -113,9 +164,17 @@ function checkAnswerCorrectness(userAnswer, correctAnswer) {
     }
   }
   
-  // Special case: if both answers are very short, be more lenient with similarity
-  if (normalizedUserAnswer.length <= 5 && normalizedCorrectAnswer.length <= 5 && similarity >= 0.6) {
-    console.log('Short answer with good similarity');
+  // Special case: "What is" and "Who is" can be interchanged
+  const stripPrefix = (text) => {
+    return text.replace(/^(what|who)\s+is\s+/i, '').trim();
+  };
+  
+  const userStripped = stripPrefix(normalizedUserAnswer);
+  const correctStripped = stripPrefix(normalizedCorrectAnswer);
+  
+  if (userStripped === correctStripped || 
+      stringSimilarity.compareTwoStrings(userStripped, correctStripped) >= 0.8) {
+    console.log('Answers match after removing what/who prefix');
     return true;
   }
   
@@ -139,6 +198,23 @@ function generateRoomCode() {
     result += characters.charAt(Math.floor(Math.random() * characters.length));
   }
   return result;
+}
+
+// Check if a player is rejoining the game
+function isPlayerRejoining(game, socketId, playerName) {
+  // Check if a player with this name exists in the game
+  const existingPlayer = game.players.find(p => 
+    p.name.toLowerCase() === playerName.toLowerCase()
+  );
+  
+  // If player exists but is disconnected, they can rejoin
+  if (existingPlayer && !existingPlayer.connected) {
+    console.log(`Player ${playerName} is rejoining game`);
+    return true;
+  }
+  
+  // If player doesn't exist, they're not rejoining
+  return false;
 }
 
 // Game state storage
@@ -231,7 +307,7 @@ io.on('connection', (socket) => {
     
     // Find the game where this player is a host
     const hostedGame = Object.values(gameStates).find(game => 
-      game.hostId === socket.id
+      game.hostId === socket.id || game.host === socket.id
     );
     
     if (hostedGame) {
@@ -240,10 +316,16 @@ io.on('connection', (socket) => {
       // Notify all players that the host has disconnected
       io.to(hostedGame.roomCode).emit('hostDisconnected');
       
-      // Remove the game
-      delete gameStates[hostedGame.roomCode];
-      
-      console.log(`Game ${hostedGame.roomCode} removed due to host disconnect`);
+      // Keep the game alive for a while in case host reconnects
+      // Set a timer to clean up the game after 5 minutes
+      setTimeout(() => {
+        if (gameStates[hostedGame.roomCode] && 
+            (!gameStates[hostedGame.roomCode].host || 
+             !io.sockets.sockets.get(gameStates[hostedGame.roomCode].host))) {
+          console.log(`Game ${hostedGame.roomCode} removed after host timeout`);
+          delete gameStates[hostedGame.roomCode];
+        }
+      }, 5 * 60 * 1000);
     } else {
       // Check if this player was in any games and mark them as disconnected
       Object.values(gameStates).forEach(game => {
@@ -255,8 +337,46 @@ io.on('connection', (socket) => {
           // Mark player as disconnected but don't remove them
           game.players[playerIndex].connected = false;
           
-          // Notify host
-          io.to(game.hostId).emit('playerDisconnected', {
+          // If this player was the buzzed player, update game state
+          if (game.buzzedPlayer && game.buzzedPlayer.id === socket.id) {
+            console.log(`Disconnected player was the buzzed player, handling as incorrect answer`);
+            
+            // Handle as if they answered incorrectly
+            if (game.answeringTimeout) {
+              clearTimeout(game.answeringTimeout);
+              game.answeringTimeout = null;
+            }
+            
+            // Re-enable buzzing for other players after a short delay
+            setTimeout(() => {
+              if (gameStates[game.roomCode]) {
+                game.buzzedPlayer = null;
+                io.to(game.roomCode).emit('buzzerReEnabled');
+              }
+            }, 1000);
+          }
+          
+          // If this player was the selecting player, pick a new one
+          if (game.selectingPlayer && game.selectingPlayer.id === socket.id) {
+            console.log(`Disconnected player was the selecting player, picking a new one`);
+            
+            // Find a new player that's still connected
+            const connectedPlayers = game.players.filter(p => p.connected && !p.isHost);
+            if (connectedPlayers.length > 0) {
+              // Pick the player with the highest score
+              connectedPlayers.sort((a, b) => b.score - a.score);
+              game.selectingPlayer = connectedPlayers[0];
+              
+              // Notify room of new selecting player
+              io.to(game.roomCode).emit('newSelectingPlayer', {
+                playerId: game.selectingPlayer.id,
+                playerName: game.selectingPlayer.name
+              });
+            }
+          }
+          
+          // Notify host and other players
+          io.to(game.roomCode).emit('playerDisconnected', {
             playerId: socket.id,
             playerName: game.players[playerIndex].name
           });
@@ -517,47 +637,49 @@ io.on('connection', (socket) => {
   // Handle player buzz
   socket.on('buzz', (roomCode) => {
     if (!roomCode) {
-      console.error('No room code provided for buzz');
+      console.error('No room code provided');
       return socket.emit('error', { message: 'Room code is required' });
     }
     
     // Convert to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
-    const game = gameStates[roomCode];
-    if (!game) {
+    if (!gameStates[roomCode]) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
     }
     
-    // Check state using both state and gameState for compatibility
-    const gameIsInQuestionState = game.state === 'questionActive' || game.gameState === 'questionActive';
+    const game = gameStates[roomCode];
     
-    if (!gameIsInQuestionState || !game.currentQuestion) {
-      console.error(`No active question or game not in question state for room ${roomCode}`);
+    // Check if game is active
+    if (game.state !== 'questionActive' && game.gameState !== 'questionActive') {
+      console.log(`Invalid buzz: game not in question active state (${game.state || game.gameState})`);
       return socket.emit('error', { message: 'No active question' });
     }
     
-    if (game.buzzedPlayer) {
-      console.error(`Another player already buzzed in for room ${roomCode}`);
-      return socket.emit('error', { message: 'Another player already buzzed in' });
-    }
-    
-    // Find the player
+    // Find player in game
     const playerIndex = game.players.findIndex(p => p.id === socket.id);
     if (playerIndex === -1) {
-      console.error(`Player not found in game ${roomCode}`);
-      return socket.emit('error', { message: 'Player not found in game' });
+      console.error(`Player ${socket.id} not found in game ${roomCode}`);
+      return socket.emit('error', { message: 'Player not found' });
     }
     
     const player = game.players[playerIndex];
-    const now = Date.now();
+    
+    // Check if a player has already buzzed in
+    if (game.buzzedPlayer) {
+      console.log(`Player ${player.name} tried to buzz in, but ${game.buzzedPlayer.name} already buzzed`);
+      return socket.emit('error', { message: 'Another player has already buzzed in' });
+    }
     
     // Check if this player has already attempted this question
     if (game.playerAttempts[player.id]) {
       console.log(`Player ${player.name} already attempted this question`);
       return socket.emit('error', { message: 'You have already attempted this question' });
     }
+    
+    // Get current time for precise timing checks
+    const now = Date.now();
     
     // Check if buzzing is allowed or if this is an early buzz
     if (!game.canBuzzIn) {
@@ -596,7 +718,7 @@ io.on('connection', (socket) => {
       game.questionTimeout = null;
     }
     
-    // Set a 5-second timeout for the player to answer
+    // Set a 7-second timeout for the player to answer
     game.answeringTimeout = setTimeout(() => {
       if (gameStates[roomCode] && gameStates[roomCode].buzzedPlayer && gameStates[roomCode].buzzedPlayer.id === player.id) {
         console.log(`Answer timeout for player ${player.name} in room ${roomCode}`);
@@ -604,20 +726,28 @@ io.on('connection', (socket) => {
         // Automatically process as incorrect answer
         handleIncorrectAnswer(roomCode, player);
       }
-    }, 5000);
+    }, 7000);
     
-    // Emit events to notify players
-    io.to(roomCode).emit('playerBuzzed', {
+    // Use volatile flag for lower latency on buzz events
+    // Using direct socket communication to minimize latency
+    const buzzData = {
       player: player,
       playerId: player.id,
-      playerName: player.name
-    });
+      playerName: player.name,
+      timestamp: Date.now() // Add timestamp for more precise synchronization
+    };
     
-    // Backward compatibility
-    io.to(roomCode).emit('player-buzzed', {
-      id: player.id,
-      name: player.name
-    });
+    // Send to host with highest priority using direct socket access
+    const hostSocket = io.sockets.sockets.get(game.hostId || game.host);
+    if (hostSocket) {
+      hostSocket.volatile.emit('playerBuzzed', buzzData);
+    }
+    
+    // Then broadcast to everyone else in the room
+    socket.to(roomCode).volatile.emit('playerBuzzed', buzzData);
+    
+    // Send confirmation back to the player who buzzed in
+    socket.volatile.emit('playerBuzzed', buzzData);
   });
   
   // Log all incoming events for debugging
@@ -712,43 +842,39 @@ io.on('connection', (socket) => {
   socket.on('selectQuestion', (roomCodeOrData, categoryIndexParam, valueIndexParam) => {
     console.log(`selectQuestion called with:`, { roomCodeOrData, categoryIndexParam, valueIndexParam });
     
+    // Extract parameters - handle both formats
     let roomCode, categoryIndex, valueIndex;
     
-    // Handle both function signatures
     if (typeof roomCodeOrData === 'string') {
-      // New format: (roomCode, categoryIndex, valueIndex)
       roomCode = roomCodeOrData;
       categoryIndex = categoryIndexParam;
       valueIndex = valueIndexParam;
-    } else if (typeof roomCodeOrData === 'object') {
-      // Legacy format: { roomCode, categoryIndex, valueIndex }
+    } else {
+      // Handle object format (backward compatibility)
       roomCode = roomCodeOrData.roomCode;
       categoryIndex = roomCodeOrData.categoryIndex;
       valueIndex = roomCodeOrData.valueIndex;
-    } else {
-      console.error('Invalid selectQuestion parameters');
-      socket.emit('error', { message: 'Invalid parameters for selectQuestion' });
-      return;
-    }
-    
-    // Validate input
-    if (!roomCode) {
-      console.error('No room code provided for selectQuestion');
-      socket.emit('error', { message: 'Room code is required' });
-      return;
     }
     
     // Convert to uppercase for consistency
     roomCode = roomCode.toString().toUpperCase();
     
     if (!gameStates[roomCode]) {
-      console.log('Invalid selectQuestion: game not found');
-      socket.emit('error', { message: 'Game not found' });
-      return;
+      console.error(`Game not found for room ${roomCode}`);
+      return socket.emit('error', { message: 'Game not found' });
     }
     
-    // Get game and check state
     const game = gameStates[roomCode];
+    
+    // Reset buzzer state completely
+    game.canBuzzIn = false;
+    game.buzzedPlayer = null;
+    game.playerAttempts = {};
+    game.earlyBuzzPenalties = {};
+    
+    if (game.buzzerEnableTime) {
+      delete game.buzzerEnableTime;
+    }
     
     // Check if game is in progress (using either state field)
     if (game.state !== 'inProgress' && game.gameState !== 'inProgress') {
@@ -802,32 +928,30 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Get question details
+    // Mark the question as revealed
+    board[category][valueIndex].revealed = true;
+    
+    // Get the question data
     const question = board[category][valueIndex];
     
-    // Reset player attempts for the new question
-    game.playerAttempts = {};
-    game.canBuzzIn = false;
-    game.buzzedPlayer = null;
-    
-    // Clear any existing timeouts
-    if (game.answeringTimeout) {
-      clearTimeout(game.answeringTimeout);
-      game.answeringTimeout = null;
-    }
+    // Clear any existing question timeout
     if (game.questionTimeout) {
       clearTimeout(game.questionTimeout);
       game.questionTimeout = null;
     }
+    
+    // Apply sanitization to the question text before sending to clients
+    const questionText = sanitizeClue(question.text || question.question);
+    const questionAnswer = question.answer;
     
     // Set current question
     game.currentQuestion = {
       category,
       categoryIndex,
       valueIndex,
-      text: question.text,
+      text: questionText,
       value: question.value,
-      answer: question.answer
+      answer: questionAnswer
     };
     
     // Update game state
@@ -857,7 +981,7 @@ io.on('connection', (socket) => {
         });
         console.log(`Buzzer enabled for room ${roomCode}`);
       }
-    }, 5000); // 5 seconds matches the typical time for host to read the question
+    }, 7000); // 7 seconds matches the typical time for host to read the question
     
     console.log(`Question selected for room ${roomCode}:`, game.currentQuestion);
   });
@@ -1143,52 +1267,57 @@ io.on('connection', (socket) => {
       return socket.emit('error', { message: 'Only the host can signal when reading is finished' });
     }
     
-    // Set buzzing to be allowed
-    game.canBuzzIn = true;
-    
     // Clear any existing timeout
     if (game.questionTimeout) {
       clearTimeout(game.questionTimeout);
     }
     
-    // Set a 5-second timeout for the question - EXACT 5000ms
-    game.questionTimeout = setTimeout(() => {
-      // Only handle timeout if no one has buzzed in
-      if (!game.buzzedPlayer && gameStates[roomCode]) {
-        console.log(`Question timeout for room ${roomCode} - no one buzzed in`);
-        
-        // Disable buzzing
-        game.canBuzzIn = false;
-        
-        // Mark the question as revealed in the board
-        if (game.currentQuestion) {
-          const question = game.currentQuestion;
-          if (game.board[question.category] && game.board[question.category][question.valueIndex]) {
-            game.board[question.category][question.valueIndex].revealed = true;
+    // First, tell all clients buzzer will be enabled soon
+    io.to(roomCode).emit('buzzerWillEnable', { roomCode });
+    
+    // Add a short delay before enabling the buzzer
+    setTimeout(() => {
+      // Set buzzing to be allowed
+      game.canBuzzIn = true;
+      
+      // Emit event to all players in the room
+      io.to(roomCode).emit('buzzerEnabled', {
+        roomCode,
+        questionId: game.currentQuestion?.text
+      });
+      
+      console.log(`Buzzer enabled for room ${roomCode}`);
+      
+      // Set a 7-second timeout for the question
+      game.questionTimeout = setTimeout(() => {
+        // Only handle timeout if no one has buzzed in
+        if (!game.buzzedPlayer && gameStates[roomCode]) {
+          console.log(`Question timeout for room ${roomCode} - no one buzzed in`);
+          
+          // Disable buzzing
+          game.canBuzzIn = false;
+          
+          // Mark the question as revealed in the board
+          if (game.currentQuestion) {
+            const question = game.currentQuestion;
+            if (game.board[question.category] && game.board[question.category][question.valueIndex]) {
+              game.board[question.category][question.valueIndex].revealed = true;
+            }
           }
+          
+          // Emit timeout event
+          io.to(roomCode).emit('timeExpired', {
+            question: game.currentQuestion,
+            answer: game.currentQuestion.answer
+          });
+          
+          // After 3 seconds, return to the board with the last correct player as the selecting player
+          setTimeout(() => {
+            returnToBoard(roomCode);
+          }, 3000);
         }
-        
-        // Emit timeout event
-        io.to(roomCode).emit('timeExpired', {
-          question: game.currentQuestion,
-          answer: game.currentQuestion.answer
-        });
-        
-        // After 3 seconds, return to the board with the last correct player as the selecting player
-        setTimeout(() => {
-          returnToBoard(roomCode);
-        }, 3000);
-      }
-    }, 5000);
-    
-    // Emit event to all players in the room
-    io.to(roomCode).emit('buzzerEnabled', {
-      roomCode,
-      questionId: game.currentQuestion?.text,
-      timeStamp: Date.now() // Send the exact timestamp when buzzing was enabled
-    });
-    
-    console.log(`Buzzer enabled for room ${roomCode}`);
+      }, 7000);
+    }, 500); // 500ms delay allows clients to prepare
   });
   
   // When time expires for a question without any buzzes
@@ -1270,33 +1399,41 @@ io.on('connection', (socket) => {
   // Function to handle incorrect answers
   function handleIncorrectAnswer(roomCode, player) {
     const game = gameStates[roomCode];
-    if (!game || !game.currentQuestion) return;
     
-    console.log(`Incorrect answer from ${player.name} in room ${roomCode}`);
-    
-    // Subtract the question value from the player's score
-    const questionValue = game.currentQuestion.value;
-    const playerIndex = game.players.findIndex(p => p.id === player.id);
-    
-    if (playerIndex !== -1) {
-      game.players[playerIndex].score -= questionValue;
-      console.log(`Subtracting ${questionValue} from ${player.name}'s score`);
+    if (!game) {
+      console.error(`Game not found for room ${roomCode}`);
+      return;
     }
     
-    // Clear the answering timeout
+    console.log(`Player ${player.name} answered incorrectly in room ${roomCode}`);
+    
+    // Deduct points for incorrect answer
+    const currentQuestion = game.currentQuestion;
+    if (!currentQuestion) {
+      console.error(`No current question for room ${roomCode}`);
+      return;
+    }
+    
+    // Cancel the answer timeout
     if (game.answeringTimeout) {
       clearTimeout(game.answeringTimeout);
       game.answeringTimeout = null;
     }
     
-    // Emit the answer judged event to all players in the room
-    io.to(roomCode).emit('answerJudged', {
-      playerId: player.id,
-      playerName: player.name,
-      answer: player.answer || "No answer given",
-      correct: false,
-      score: game.players[playerIndex].score
-    });
+    // Deduct points based on question value
+    const deduction = currentQuestion.value;
+    const playerIndex = game.players.findIndex(p => p.id === player.id);
+    
+    if (playerIndex !== -1) {
+      game.players[playerIndex].score -= deduction;
+      
+      // Ensure score doesn't go below zero in tournament mode
+      if (game.tournamentMode && game.players[playerIndex].score < 0) {
+        game.players[playerIndex].score = 0;
+      }
+      
+      console.log(`Player ${player.name} score updated to ${game.players[playerIndex].score}`);
+    }
     
     // Reset the buzzed player to allow others to buzz in
     game.buzzedPlayer = null;
@@ -1309,10 +1446,11 @@ io.on('connection', (socket) => {
     if (playersWhoCanBuzz.length > 0) {
       console.log(`${playersWhoCanBuzz.length} players can still buzz in for this question`);
       game.canBuzzIn = true;
-      io.to(roomCode).emit('buzzerEnabled', {
+      
+      // Emit buzzerReEnabled with simpler approach
+      io.to(roomCode).emit('buzzerReEnabled', {
         roomCode,
-        questionId: game.currentQuestion.text,
-        timeStamp: Date.now()
+        questionId: game.currentQuestion.text
       });
       
       // Set a short timeout for remaining players to buzz in
@@ -1338,7 +1476,7 @@ io.on('connection', (socket) => {
             returnToBoard(roomCode);
           }, 3000);
         }
-      }, 5000); // 5 seconds for other players to buzz in
+      }, 7000); // 7 seconds for other players to buzz in
     } else {
       // If no one else can buzz in, reveal the answer
       const question = game.currentQuestion;
