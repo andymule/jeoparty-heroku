@@ -37,7 +37,12 @@ dotenv.config();
 
 // Initialize Express app
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -189,6 +194,9 @@ const io = socketIo(server, {
     methods: ['GET', 'POST']
   }
 });
+
+// Export app for testing
+module.exports = app;
 
 // Generate a room code
 function generateRoomCode() {
@@ -497,12 +505,14 @@ app.post('/api/games/create', async (req, res) => {
     
     console.log(`Game successfully created with room code ${roomCode}`);
     res.json({
+      success: true,
       roomCode,
       gameState: gameStates[roomCode]
     });
   } catch (error) {
-    console.error('Error creating game via /api/games/create:', error);
+    console.error('Error creating game:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to create game', 
       details: error.message,
       stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
@@ -2328,8 +2338,11 @@ initializeDataset().then(() => {
   process.exit(1); // Exit if unable to load dataset
 });
 
-// Start the server
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-}); 
+// Start the server only if not in test mode
+if (process.env.NODE_ENV !== 'test') {
+  // Start the server
+  const PORT = process.env.PORT || 5000;
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  }); 
+} 

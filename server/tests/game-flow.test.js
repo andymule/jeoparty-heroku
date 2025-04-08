@@ -3,18 +3,36 @@ const { spawn } = require('child_process');
 const { promisify } = require('util');
 const sleep = promisify(setTimeout);
 const io = require('socket.io-client');
+const express = require('express');
+const app = require('../index.js');
+const { initializeDataset } = require('../db');
 
 describe('Game Flow Integration Tests', () => {
-  // These tests require a running server
-  // This is a longer test suite that tests the entire game flow
+  let server;
   
   // Configuration for test
   const API_URL = process.env.TEST_API_URL || 'http://localhost:5000';
   const SOCKET_URL = process.env.TEST_SOCKET_URL || 'http://localhost:5000';
   let request;
   
-  beforeAll(() => {
-    request = supertest(API_URL);
+  beforeAll(async () => {
+    // Initialize the database
+    await initializeDataset();
+    
+    // Set test environment
+    process.env.NODE_ENV = 'test';
+    
+    // Start the server on a different port
+    server = app.listen(5001);
+    request = supertest(app);
+    
+    // Wait for server to be ready
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  });
+  
+  afterAll(async () => {
+    // Close the server after tests
+    await server.close();
   });
   
   test('1. Create game via API', async () => {
