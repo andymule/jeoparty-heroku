@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jeoparty API Test Client</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .endpoint {
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    button {
+      padding: 8px 16px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    pre {
+      background-color: #f5f5f5;
+      padding: 10px;
+      border-radius: 4px;
+      white-space: pre-wrap;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .success {
+      color: green;
+      font-weight: bold;
+    }
+    .error {
+      color: red;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>Jeoparty API Test Client</h1>
+  <p>This page tests different API endpoints to identify which ones are working correctly.</p>
+  
+  <div class="container">
+    <div class="endpoint">
+      <h3>Direct Server API: /api/games/create</h3>
+      <button onclick="testEndpoint('http://localhost:5005/api/games/create', 'direct-api-result')">Test Direct Server API</button>
+      <pre id="direct-api-result">Results will appear here</pre>
+    </div>
+    
+    <div class="endpoint">
+      <h3>Proxied API: /api/games/create</h3>
+      <button onclick="testEndpoint('/api/games/create', 'proxied-api-result')">Test Proxied API</button>
+      <pre id="proxied-api-result">Results will appear here</pre>
+    </div>
+
+    <div class="endpoint">
+      <h3>Alternate Path: /games/create</h3>
+      <button onclick="testEndpoint('/games/create', 'games-create-result')">Test /games/create</button>
+      <pre id="games-create-result">Results will appear here</pre>
+    </div>
+
+    <div class="endpoint">
+      <h3>Simple Path: /api/games</h3>
+      <button onclick="testEndpoint('/api/games', 'api-games-result')">Test /api/games</button>
+      <pre id="api-games-result">Results will appear here</pre>
+    </div>
+  </div>
+
+  <script>
+    async function testEndpoint(url, resultElementId) {
+      const resultElement = document.getElementById(resultElementId);
+      resultElement.innerHTML = 'Testing...';
+      
+      const testData = {
+        hostName: 'TestUser',
+        gameDate: null,
+        yearRange: { start: 1984, end: 2024 }
+      };
+      
+      try {
+        const startTime = Date.now();
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(testData)
+        });
+        const endTime = Date.now();
+        
+        try {
+          const data = await response.json();
+          resultElement.innerHTML = `<span class="${response.ok ? 'success' : 'error'}">Status: ${response.status} (${endTime - startTime}ms)</span>\n${JSON.stringify(data, null, 2)}`;
+        } catch (e) {
+          const text = await response.text();
+          resultElement.innerHTML = `<span class="error">Status: ${response.status} (${endTime - startTime}ms)</span>\nNon-JSON response: ${text}`;
+        }
+      } catch (error) {
+        resultElement.innerHTML = `<span class="error">Error: ${error.message}</span>`;
+      }
+    }
+  </script>
+</body>
+</html> 

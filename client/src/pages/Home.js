@@ -245,22 +245,70 @@ const Home = () => {
       
       setDebug('Sending create game request...');
       
-      // Use the correct working API endpoint as confirmed by our test script
-      const response = await axios.post('/api/games/create', {
+      // Create request data
+      const requestData = {
         hostName: playerName.trim(),
         gameDate: selectedDate,
-        yearRange: yearRange // Include the year range
-      });
+        yearRange: yearRange
+      };
       
-      console.log('API response:', response);
+      // Try all possible endpoints in sequence until one works
+      const endpoints = [
+        '/api/games/create', 
+        '/api/games', 
+        '/games/create',
+        '/test-endpoint'
+      ];
       
-      if (response.data.roomCode) {
-        console.log('Game created successfully:', response.data);
-        navigate(`/game/host/${response.data.roomCode}`);
-      } else {
-        console.error('Failed to create game:', response.data);
-        setError(response.data.message || 'Failed to create game');
+      // Try using the fetch API sequentially through all endpoints
+      for (const endpoint of endpoints) {
+        console.log(`Trying fetch API with ${endpoint}...`);
+        try {
+          const fetchResponse = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify(requestData),
+          });
+          
+          console.log(`${endpoint} response status:`, fetchResponse.status);
+          
+          if (fetchResponse.ok) {
+            const data = await fetchResponse.json();
+            console.log(`Game created successfully with ${endpoint}:`, data);
+            
+            // Check if we have a roomCode in the response
+            if (data.roomCode) {
+              navigate(`/game/host/${data.roomCode}`);
+              return;
+            } else if (data.success) {
+              console.log('Response indicates success but no roomCode, checking for nested data');
+              // Sometimes the room code might be nested in gameState
+              if (data.gameState && data.gameState.roomCode) {
+                navigate(`/game/host/${data.gameState.roomCode}`);
+                return;
+              }
+            }
+            
+            console.warn(`${endpoint} returned success but no valid roomCode:`, data);
+          } else {
+            console.error(`${endpoint} failed, status:`, fetchResponse.status);
+            try {
+              const errorText = await fetchResponse.text();
+              console.error(`${endpoint} error response:`, errorText);
+            } catch (e) {
+              console.error(`Couldn't read error response for ${endpoint}`);
+            }
+          }
+        } catch (fetchError) {
+          console.error(`Fetch error with ${endpoint}:`, fetchError);
+        }
       }
+      
+      // If we got here, all endpoints failed
+      setError('Failed to create game: all API endpoints failed. Please check server logs.');
     } catch (err) {
       console.error('Error creating game:', err);
       setError('Error creating game: ' + (err.response?.data?.message || err.message || 'Unknown error'));

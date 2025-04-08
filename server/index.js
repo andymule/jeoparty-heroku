@@ -2333,3 +2333,83 @@ const PORT = process.env.PORT || 5005;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 }); 
+
+// Add a dedicated test endpoint
+app.post('/test-endpoint', (req, res) => {
+  console.log('TEST ENDPOINT CALLED:', req.body);
+  res.json({
+    success: true,
+    message: 'Test endpoint working',
+    receivedData: req.body
+  });
+});
+
+// Make sure the games/create endpoint is also registered (as a fallback)
+app.post('/games/create', async (req, res) => {
+  console.log('POST /games/create - Request received:', req.body);
+  // Forward to the API endpoint
+  try {
+    // Get the hostName
+    const { hostName, playerName, yearRange, gameDate } = req.body;
+    
+    // Check if we have a valid name parameter
+    const nameToUse = hostName || playerName;
+    
+    if (!nameToUse) {
+      console.error('POST /games/create - Missing required name parameter. Request body:', req.body);
+      return res.status(400).json({ 
+        error: 'Host name or player name is required',
+        requestBody: req.body 
+      });
+    }
+    
+    console.log(`POST /games/create - Creating game with name: ${nameToUse}`);
+    
+    // Create a new game state
+    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+    
+    gameStates[roomCode] = {
+      roomCode,
+      hostId: null,
+      hostName: nameToUse,
+      players: [],
+      currentState: 'waiting',
+      board: null,
+      categories: [],
+      selectedQuestion: null,
+      round: 1,
+      yearRange: yearRange || { start: 1984, end: 2024 },
+      gameDate,
+      scores: {},
+      activePlayer: null,
+      buzzerEnabled: false,
+      buzzedPlayers: [],
+      dailyDoubleWager: 0,
+      usedQuestions: [],
+      isInMemoryMode: true
+    };
+    
+    // Create a randomly selected set of categories and questions for this game
+    try {
+      await setupGameBoard(roomCode);
+      console.log(`Game board successfully created for room ${roomCode}`);
+    } catch (setupError) {
+      console.error(`Error setting up game board for room ${roomCode}:`, setupError);
+      return res.status(500).json({ error: `Failed to setup game board: ${setupError.message}` });
+    }
+    
+    console.log(`Game successfully created with room code ${roomCode}`);
+    res.json({
+      success: true,
+      roomCode,
+      gameState: gameStates[roomCode]
+    });
+  } catch (error) {
+    console.error('Error in /games/create endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to create game', 
+      details: error.message,
+      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
+    });
+  }
+});
