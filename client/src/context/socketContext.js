@@ -4,7 +4,7 @@ import io from 'socket.io-client';
 // Determine the server URL based on environment
 const SERVER_URL = process.env.NODE_ENV === 'production' 
   ? window.location.origin  // In production, use same origin
-  : 'http://localhost:5000'; // In development, use localhost
+  : 'http://localhost:5001'; // In development, use localhost
 
 console.log('Socket context initializing with server URL:', SERVER_URL);
 

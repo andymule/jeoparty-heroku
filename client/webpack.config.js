@@ -52,12 +52,24 @@ module.exports = {
   devServer: {
     historyApiFallback: true,
     port: 3000,
+    host: '0.0.0.0',
+    client: {
+      webSocketURL: 'auto://0.0.0.0:0/ws',
+      logging: 'verbose',
+      overlay: true
+    },
+    allowedHosts: 'all',
     proxy: {
-      '/api': 'http://localhost:5000',
+      '/api': 'http://localhost:5001',
       '/socket.io': {
-        target: 'http://localhost:5000',
+        target: 'http://localhost:5001',
         ws: true
       }
-    }
+    },
+    static: {
+      directory: path.join(__dirname, 'public')
+    },
+    hot: true,
+    open: true
   }
 }; 

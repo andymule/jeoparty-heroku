@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { parse } = require('csv-parse/sync');
+const { parse } = require('csv-parse');
 
 class JeopardyDataset {
   constructor() {
@@ -8,23 +8,46 @@ class JeopardyDataset {
     this.categories = new Set();
   }
 
-  loadFromFile(filePath) {
+  async loadFromFile(filePath) {
     try {
-      const fileContent = fs.readFileSync(filePath, 'utf-8');
-      const records = parse(fileContent, {
-        columns: true,
-        delimiter: '\t',
-        skip_empty_lines: true
-      });
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`Dataset file not found at: ${filePath}`);
+      }
 
-      this.questions = records;
-      this.categories = new Set(records.map(q => q.category));
+      const fileContent = fs.readFileSync(filePath, 'utf-8');
       
-      console.log(`Loaded ${this.questions.length} questions and ${this.categories.size} categories`);
-      return true;
+      return new Promise((resolve, reject) => {
+        const records = [];
+        const parser = parse(fileContent, {
+          columns: true,
+          delimiter: '\t',
+          skip_empty_lines: true,
+          quote: '"',
+          relax_quotes: true,
+          escape: '\\'
+        });
+
+        parser.on('readable', () => {
+          let record;
+          while ((record = parser.read()) !== null) {
+            records.push(record);
+          }
+        });
+
+        parser.on('error', (err) => {
+          reject(err);
+        });
+
+        parser.on('end', () => {
+          this.questions = records;
+          this.categories = new Set(records.map(q => q.category));
+          console.log(`Loaded ${this.questions.length} questions and ${this.categories.size} categories from ${filePath}`);
+          resolve(true);
+        });
+      });
     } catch (error) {
       console.error('Error loading dataset:', error);
-      return false;
+      throw error;
     }
   }
 
@@ -62,13 +85,10 @@ class JeopardyDataset {
 const dataset = new JeopardyDataset();
 
 module.exports = {
-  loadDataset: () => {
-    const datasetPath = path.join(__dirname, '../../data/combined_season1-40.tsv');
+  loadDataset: async () => {
+    const datasetPath = path.join(__dirname, '../../data/jeopardy_clue_dataset-main/combined_season1-40.tsv');
     console.log('Loading dataset from:', datasetPath);
-    const success = dataset.loadFromFile(datasetPath);
-    if (!success) {
-      throw new Error('Failed to load dataset');
-    }
+    await dataset.loadFromFile(datasetPath);
     return dataset;
   }
 }; 
