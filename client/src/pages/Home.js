@@ -245,8 +245,8 @@ const Home = () => {
       
       setDebug('Sending create game request...');
       
-      // Use the correct API endpoint that exists on the server
-      const response = await axios.post('/api/games/create', {
+      // Use the path where the server is actually receiving the request
+      const response = await axios.post('/games/create', {
         hostName: playerName.trim(),
         gameDate: selectedDate,
         yearRange: yearRange // Include the year range
