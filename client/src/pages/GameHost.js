@@ -300,24 +300,31 @@ const JudgmentButtons = styled.div`
 const GameHost = () => {
   const { roomCode } = useParams();
   const navigate = useNavigate();
-  const [socket, setSocket] = useState(null);
+  const [error, setError] = useState(null);
+  const [gameState, setGameState] = useState('joining'); // joining, waiting, inProgress, finished
   const [players, setPlayers] = useState([]);
   const [categories, setCategories] = useState([]);
   const [board, setBoard] = useState({});
-  const [gameState, setGameState] = useState('waiting');
-  const [showQuestion, setShowQuestion] = useState(false);
+  const [currentRound, setCurrentRound] = useState('singleJeopardy'); // singleJeopardy, doubleJeopardy, finalJeopardy
   const [currentQuestion, setCurrentQuestion] = useState(null);
+  const [showQuestion, setShowQuestion] = useState(false);
   const [answerRevealed, setAnswerRevealed] = useState(false);
   const [buzzedPlayer, setBuzzedPlayer] = useState(null);
   const [playerAnswer, setPlayerAnswer] = useState(null);
+  const [canBuzzIn, setCanBuzzIn] = useState(false);
   const [selectingPlayer, setSelectingPlayer] = useState(null);
-  const [error, setError] = useState(null);
-  const [timerProgress, setTimerProgress] = useState(100);
+  const [isHostJudging, setIsHostJudging] = useState(false);
+  const [currentWager, setCurrentWager] = useState(null);
+  const [isDailyDouble, setIsDailyDouble] = useState(false);
+  const [timerProgress, setTimerProgress] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
-  const [currentRound, setCurrentRound] = useState(null);
+  const [finalJeopardyRevealed, setFinalJeopardyRevealed] = useState(false);
+  const [dailyDoubleRevealed, setDailyDoubleRevealed] = useState(false);
+  const [playerName, setPlayerName] = useState(localStorage.getItem('playerName') || 'Host');
+  // Add missing round transition state variables
   const [showRoundTransition, setShowRoundTransition] = useState(false);
-  const [roundTransitionMessage, setRoundTransitionMessage] = useState('');
   const [roundTransitionTitle, setRoundTransitionTitle] = useState('');
+  const [roundTransitionMessage, setRoundTransitionMessage] = useState('');
   const [finalJeopardyState, setFinalJeopardyState] = useState({
     category: '',
     question: '',
@@ -326,26 +333,25 @@ const GameHost = () => {
     playerAnswers: {},
     playerJudgments: {},
     showQuestion: false,
-    showAnswer: false
+    showAnswer: false,
+    eligiblePlayers: []
   });
   
+  // Refs for timers/effects
   const socketRef = useRef(null);
-  const speechSynthesis = useRef(window.speechSynthesis);
-  const buzzerSound = useRef(null);
-  const [canBuzzIn, setCanBuzzIn] = useState(false);
+  const [socket, setSocket] = useState(null);
   const timerRef = useRef(null);
   const timerIntervalRef = useRef(null);
-  const [questionCycle, setQuestionCycle] = useState(0);
-  const correctSound = useRef(null);
-  const incorrectSound = useRef(null);
+  const buzzerTimeoutRef = useRef(null);
+  const buzzSoundRef = useRef(null);
   const roundTransitionTimeoutRef = useRef(null);
+  // Speech synthesis ref
+  const speechSynthesis = useRef(window.speechSynthesis);
 
   // Initialize the buzzer sound
   useEffect(() => {
     // Preload all sounds
-    buzzerSound.current = loadSound('BUZZER');
-    correctSound.current = loadSound('CORRECT');
-    incorrectSound.current = loadSound('INCORRECT');
+    buzzSoundRef.current = loadSound('BUZZER');
     
     return () => {
       // Clean up all sounds
@@ -472,38 +478,98 @@ const GameHost = () => {
     
     // Clear any previous socket connection
     if (socketRef.current) {
+      console.log('Disconnecting previous socket connection');
       socketRef.current.disconnect();
     }
     
     // Create socket connection
     const socketUrl = process.env.REACT_APP_SOCKET_URL || window.location.origin;
     console.log('Connecting to socket server at:', socketUrl);
-    const newSocket = io(socketUrl);
+    const newSocket = io(socketUrl, {
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
+      transports: ['websocket', 'polling'],
+      forceNew: true,
+      upgrade: true,
+      rememberUpgrade: true
+    });
     socketRef.current = newSocket;
     setSocket(newSocket);
     
     // Basic socket listeners for connection status
     newSocket.on('connect', () => {
       console.log('Connected to server with socket ID:', newSocket.id);
+      setError(null); // Clear any previous errors on successful connection
+      
+      // Send a debug message first to test connection
+      console.log('Sending debug message to server');
+      newSocket.emit('debug', { 
+        page: 'GameHost', 
+        roomCode, 
+        clientTime: new Date().toISOString() 
+      });
       
       // After connecting, create/join the game
+      console.log(`Emitting createGame event for room: ${roomCode}`);
       newSocket.emit('createGame', {
-        playerName: 'Host',
+        playerName: playerName || 'Host',
         roomCode: roomCode
       });
     });
     
+    // Debug response handler
+    newSocket.on('debug_response', (data) => {
+      console.log('Received debug response from server:', data);
+    });
+    
     newSocket.on('connect_error', (err) => {
       console.error('Connection error:', err);
-      setError(`Connection error: ${err.message}`);
+      setError(`Connection error: ${err.message || 'Unable to connect to server'}`);
+      
+      // Try to reconnect using polling if websocket fails
+      if (newSocket.io.opts.transports[0] === 'websocket') {
+        console.log('Connection failed with websocket, trying polling...');
+        newSocket.io.opts.transports = ['polling', 'websocket'];
+      }
     });
     
     newSocket.on('disconnect', (reason) => {
       console.log('Disconnected from server:', reason);
+      setError(`Disconnected from server: ${reason}`);
+      
       if (reason === 'io server disconnect') {
         // Server disconnected us, try to reconnect
+        console.log('Server initiated disconnect, attempting to reconnect');
         newSocket.connect();
+      } else if (reason === 'transport close' || reason === 'transport error') {
+        console.log('Transport issue, attempting to reconnect');
+        setTimeout(() => {
+          if (!newSocket.connected) {
+            console.log('Trying to reconnect after transport issue');
+            newSocket.connect();
+          }
+        }, 1000);
       }
+    });
+    
+    // Setup reconnect listeners
+    newSocket.io.on('reconnect', (attempt) => {
+      console.log(`Socket reconnected after ${attempt} attempts`);
+    });
+    
+    newSocket.io.on('reconnect_attempt', (attempt) => {
+      console.log(`Socket reconnection attempt: ${attempt}`);
+    });
+    
+    newSocket.io.on('reconnect_error', (error) => {
+      console.error('Socket reconnection error:', error);
+    });
+    
+    newSocket.io.on('reconnect_failed', () => {
+      console.error('Socket reconnection failed after all attempts');
+      setError('Unable to connect to game server after multiple attempts');
     });
     
     // Game event listeners
@@ -515,11 +581,13 @@ const GameHost = () => {
     newSocket.on('gameCreated', (data) => {
       console.log('Game created successfully:', data);
       if (!data || !data.roomCode) {
+        console.error('Invalid gameCreated response:', data);
         setError('Invalid response from server');
         return;
       }
       
       // Update game state with received data
+      console.log('Setting game state to waiting and updating players');
       setGameState('waiting');
       setPlayers(data.game?.players || []);
     });

@@ -17,11 +17,13 @@ describe('Database Module', () => {
     while(db.inMemoryDataset.length > 0) {
       db.inMemoryDataset.pop();
     }
+    // Reset indexes
+    db.resetIndexes();
   });
 
   test('initializeDataset loads data correctly', async () => {
-    // Add test data directly to the exported inMemoryDataset
-    db.inMemoryDataset.push({
+    // Add test data using the addQuestion function to ensure proper indexing
+    db.addQuestion({
       id: 1,
       round: 1,
       clue_value: 200,
@@ -39,17 +41,17 @@ describe('Database Module', () => {
   });
 
   test('getQuestionsCount returns correct count', () => {
-    // Add test data directly
-    db.inMemoryDataset.push({ id: 1 });
-    db.inMemoryDataset.push({ id: 2 });
+    // Add test data using the addQuestion function
+    db.addQuestion({ id: 1 });
+    db.addQuestion({ id: 2 });
     expect(db.getQuestionsCount()).toBe(2);
   });
 
   test('getCategories returns unique categories', () => {
-    // Add test data directly
-    db.inMemoryDataset.push({ category: 'Category A' });
-    db.inMemoryDataset.push({ category: 'Category B' });
-    db.inMemoryDataset.push({ category: 'Category A' });
+    // Add test data using the addQuestion function
+    db.addQuestion({ id: 1, category: 'Category A' });
+    db.addQuestion({ id: 2, category: 'Category B' });
+    db.addQuestion({ id: 3, category: 'Category A' });
     
     const categories = db.getCategories();
     expect(categories.length).toBe(2);
@@ -58,10 +60,10 @@ describe('Database Module', () => {
   });
 
   test('getQuestionsByCategory returns filtered questions', () => {
-    // Add test data directly
-    db.inMemoryDataset.push({ category: 'Category A', question: 'Q1' });
-    db.inMemoryDataset.push({ category: 'Category B', question: 'Q2' });
-    db.inMemoryDataset.push({ category: 'Category A', question: 'Q3' });
+    // Add test data using the addQuestion function
+    db.addQuestion({ id: 1, category: 'Category A', question: 'Q1' });
+    db.addQuestion({ id: 2, category: 'Category B', question: 'Q2' });
+    db.addQuestion({ id: 3, category: 'Category A', question: 'Q3' });
     
     const questions = db.getQuestionsByCategory('Category A');
     expect(questions.length).toBe(2);
@@ -70,11 +72,11 @@ describe('Database Module', () => {
   });
 
   test('getRandomQuestionsByCategory returns random questions', () => {
-    // Add test data directly
-    db.inMemoryDataset.push({ category: 'Category A', round: 1, question: 'Q1' });
-    db.inMemoryDataset.push({ category: 'Category A', round: 1, question: 'Q2' });
-    db.inMemoryDataset.push({ category: 'Category A', round: 1, question: 'Q3' });
-    db.inMemoryDataset.push({ category: 'Category A', round: 2, question: 'Q4' });
+    // Add test data using the addQuestion function
+    db.addQuestion({ id: 1, category: 'Category A', round: 1, question: 'Q1' });
+    db.addQuestion({ id: 2, category: 'Category A', round: 1, question: 'Q2' });
+    db.addQuestion({ id: 3, category: 'Category A', round: 1, question: 'Q3' });
+    db.addQuestion({ id: 4, category: 'Category A', round: 2, question: 'Q4' });
     
     const questions = db.getRandomQuestionsByCategory('Category A', 1, 2);
     expect(questions.length).toBe(2);
@@ -85,11 +87,11 @@ describe('Database Module', () => {
   });
 
   test('getQuestionsByYearRange returns questions within range', () => {
-    // Add test data with explicit dates in ISO format
-    db.inMemoryDataset.push({ air_date: '2018-01-01', question: 'Q1' });
-    db.inMemoryDataset.push({ air_date: '2019-01-01', question: 'Q2' });
-    db.inMemoryDataset.push({ air_date: '2020-01-01', question: 'Q3' });
-    db.inMemoryDataset.push({ air_date: '2021-01-01', question: 'Q4' });
+    // Add test data with explicit dates in ISO format using addQuestion
+    db.addQuestion({ id: 1, air_date: '2018-01-01', question: 'Q1' });
+    db.addQuestion({ id: 2, air_date: '2019-01-01', question: 'Q2' });
+    db.addQuestion({ id: 3, air_date: '2020-01-01', question: 'Q3' });
+    db.addQuestion({ id: 4, air_date: '2021-01-01', question: 'Q4' });
     
     const questions = db.getQuestionsByYearRange(2019, 2020);
     // Ensure we match exactly 2 questions (2019 and 2020)

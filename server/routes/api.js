@@ -4,6 +4,18 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const gameLogic = require('../utils/gameLogic');
 
+// Status endpoint for health checks
+router.get('/status', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    datasetLoaded: db.getQuestionsCount() > 0,
+    questionsCount: db.getQuestionsCount(),
+    categoriesCount: db.getCategories().length
+  });
+});
+
 // Get all categories
 router.get('/categories', async (req, res) => {
   try {

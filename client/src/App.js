@@ -39,48 +39,84 @@ const ConnectionMessage = styled.div`
   left: 0;
   right: 0;
   padding: 10px;
-  background-color: #f44336;
+  background-color: ${({ $isError }) => $isError ? '#f44336' : '#ff9800'};
   color: white;
   text-align: center;
   font-weight: bold;
   z-index: 1000;
+  animation: slideDown 0.3s ease-in-out;
+  
+  @keyframes slideDown {
+    from { transform: translateY(-100%); }
+    to { transform: translateY(0); }
+  }
 `;
 
 // Socket status monitor component
 const SocketMonitor = () => {
-  const { status, error } = useSocketStatus();
+  const { status, error, hasConnectedBefore, reconnect } = useSocketStatus();
+  const [showMessage, setShowMessage] = useState(false);
   
-  if (status === SocketStatus.CONNECTED) {
-    return <ConnectionStatus $status={status}>Connected</ConnectionStatus>;
+  // Only show full error message temporarily after we've connected at least once
+  useEffect(() => {
+    // Only show disconnection messages if we had previously connected
+    if ((status === SocketStatus.DISCONNECTED || status === SocketStatus.ERROR) && hasConnectedBefore) {
+      setShowMessage(true);
+      // Hide the message after 5 seconds to be less intrusive
+      const timer = setTimeout(() => {
+        setShowMessage(false);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [status, hasConnectedBefore]);
+  
+  // Always show the status indicator if we've connected at least once
+  const statusIndicator = hasConnectedBefore ? (
+    <ConnectionStatus $status={status}>
+      {status === SocketStatus.CONNECTED ? 'Connected' : 
+       status === SocketStatus.CONNECTING ? 'Connecting...' : 
+       status === SocketStatus.DISCONNECTED ? 'Disconnected' : 'Error'}
+    </ConnectionStatus>
+  ) : null;
+  
+  // Only show the error message banner if showMessage is true
+  if (showMessage) {
+    if (status === SocketStatus.DISCONNECTED) {
+      return (
+        <>
+          <ConnectionMessage $isError={false}>
+            Disconnected from server. Attempting to reconnect...
+            <button 
+              onClick={reconnect} 
+              style={{marginLeft: '10px', padding: '2px 8px', cursor: 'pointer'}}
+            >
+              Reconnect Now
+            </button>
+          </ConnectionMessage>
+          {statusIndicator}
+        </>
+      );
+    }
+    
+    if (status === SocketStatus.ERROR) {
+      return (
+        <>
+          <ConnectionMessage $isError={true}>
+            Connection error: {error || 'Failed to connect to server'}
+            <button 
+              onClick={reconnect} 
+              style={{marginLeft: '10px', padding: '2px 8px', cursor: 'pointer'}}
+            >
+              Retry
+            </button>
+          </ConnectionMessage>
+          {statusIndicator}
+        </>
+      );
+    }
   }
   
-  if (status === SocketStatus.CONNECTING) {
-    return <ConnectionStatus $status={status}>Connecting...</ConnectionStatus>;
-  }
-  
-  if (status === SocketStatus.DISCONNECTED) {
-    return (
-      <>
-        <ConnectionMessage>
-          Disconnected from server. Attempting to reconnect...
-        </ConnectionMessage>
-        <ConnectionStatus $status={status}>Disconnected</ConnectionStatus>
-      </>
-    );
-  }
-  
-  if (status === SocketStatus.ERROR) {
-    return (
-      <>
-        <ConnectionMessage>
-          Connection error: {error || 'Failed to connect to server'}
-        </ConnectionMessage>
-        <ConnectionStatus $status={status}>Error</ConnectionStatus>
-      </>
-    );
-  }
-  
-  return null;
+  return statusIndicator;
 };
 
 const App = () => {
@@ -90,18 +126,25 @@ const App = () => {
     // Detect device type
     setDeviceType(isMobile() ? 'mobile' : 'desktop');
     
-    // Log socket.io connection status
-    socket.on('connect', () => {
-      console.log('Connected to server with ID:', socket.id);
-    });
+    // Log socket.io connection status - but only when needed
+    const connectHandler = () => {
+      // Only log connection messages during development if specifically requested
+      if (process.env.NODE_ENV !== 'production' && process.env.REACT_APP_DEBUG_SOCKETS === 'true') {
+        console.log('Connected to server with ID:', socket.id);
+      }
+    };
     
-    socket.on('disconnect', () => {
-      console.log('Disconnected from server');
-    });
+    const disconnectHandler = () => {
+      // Completely suppress disconnect messages to avoid console noise
+      // These are already handled by the SocketMonitor component
+    };
+    
+    socket.on('connect', connectHandler);
+    socket.on('disconnect', disconnectHandler);
     
     return () => {
-      socket.off('connect');
-      socket.off('disconnect');
+      socket.off('connect', connectHandler);
+      socket.off('disconnect', disconnectHandler);
     };
   }, []);
   

@@ -19,6 +19,12 @@ function initializeSocketHandlers(io) {
   // Handle socket.io connections
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
+    
+    // Debug listener for easier troubleshooting
+    socket.on('debug', (message) => {
+      console.log(`DEBUG from ${socket.id}: ${JSON.stringify(message)}`);
+      socket.emit('debug_response', { received: message, timestamp: Date.now() });
+    });
 
     // Handle disconnections
     socket.on('disconnect', () => {
@@ -34,12 +40,19 @@ function initializeSocketHandlers(io) {
         const yearStart = data?.yearStart || null;
         const yearEnd = data?.yearEnd || null;
 
-        console.log(`Creating game for ${playerName} with room code ${roomCode}`);
+        console.log(`Creating game for ${playerName} with room code ${roomCode}, year range: ${yearStart}-${yearEnd}`);
         
-        handleCreateGame(socket, playerName, roomCode, yearStart, yearEnd);
+        handleCreateGame(socket, playerName, roomCode, yearStart, yearEnd)
+          .then(game => {
+            console.log(`Game created successfully for room ${game?.roomCode || 'unknown'}`);
+          })
+          .catch(error => {
+            console.error(`Failed to create game: ${error.message}`);
+            socket.emit('error', { message: `Failed to create game: ${error.message}` });
+          });
       } catch (error) {
         console.error('Error in createGame handler:', error);
-        socket.emit('error', { message: 'Failed to create game' });
+        socket.emit('error', { message: 'Failed to create game: ' + error.message });
       }
     });
 
@@ -258,7 +271,8 @@ async function handleCreateGame(socket, playerName, roomCode, yearStart, yearEnd
     };
     
     // Set up initial game board
-    const board = await gameLogic.setupGameBoard(null, yearStart, yearEnd);
+    console.log(`Creating game board for room ${gameRoomCode} with year range: ${yearStart}-${yearEnd}`);
+    const board = await gameLogic.setupGameBoard(yearStart, yearEnd);
     
     // Create game state
     const game = {

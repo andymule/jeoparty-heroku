@@ -1,6 +1,10 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 
+// Constants for game setup
+const CATEGORIES_PER_ROUND = 6;
+const CLUES_PER_CATEGORY = 5;
+
 // Function to generate a unique room code
 function generateRoomCode() {
   const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Omit confusing characters (O, 0, 1, I)
@@ -30,336 +34,427 @@ function isPlayerRejoining(game, socketId, playerName) {
   return false;
 }
 
-// Set up the game board with categories and questions
-async function setupGameBoard(categorySlug = null, yearStart = null, yearEnd = null) {
-  // Get all categories from the database
+// Use database indexes for efficient lookup
+// Returns a set of categories with appropriate questions for the given round
+async function getCategoriesForRound(round, yearRange = null) {
+  console.time(`getCategoriesForRound-${round}`);
+  
+  // Get all categories
   const allCategories = db.getCategories();
   
-  // If filtered by year range, get only questions from that range
-  let filteredQuestions = [];
-  if (yearStart && yearEnd) {
-    filteredQuestions = db.getQuestionsByYearRange(parseInt(yearStart), parseInt(yearEnd));
-    
-    // Get unique categories from the filtered questions
-    const uniqueCategories = Array.from(new Set(filteredQuestions.map(q => q.category)))
-      .map(category => ({ category }));
-    
-    // Use these categories instead of all categories
-    if (uniqueCategories.length >= 6) {
-      allCategories.length = 0;
-      allCategories.push(...uniqueCategories);
-    }
-  }
+  // Shuffle to get random selection each time
+  const shuffledCategories = shuffleArray(allCategories.slice());
   
-  // Shuffle the categories and select 6 for the game
-  const shuffledCategories = allCategories.sort(() => 0.5 - Math.random());
-  const gameCategories = shuffledCategories.slice(0, 6);
+  // Variables to track our progress
+  const categories = [];
+  const processedCategories = new Set();
+  const maxCategoriesToProcess = 1000; // Limit to prevent hanging
+  let startTime = Date.now();
+  let timeoutOccurred = false;
   
-  // Create the game board with selected categories
-  const board = {
-    categories: gameCategories.map(cat => cat.category),
-    questions: []
-  };
+  console.log(`Finding categories for round ${round}${yearRange ? ` within years ${yearRange[0]}-${yearRange[1]}` : ''}`);
   
-  // For each category, get 5 questions for round 1
-  for (const category of board.categories) {
-    let categoryQuestions;
+  // First try with year range if specified (with timeout protection)
+  if (yearRange && Array.isArray(yearRange) && yearRange.length === 2) {
+    const [startYear, endYear] = yearRange;
+    let counter = 0;
     
-    if (filteredQuestions.length > 0) {
-      // If we have filtered questions, use those
-      categoryQuestions = filteredQuestions
-        .filter(q => q.category === category && q.round === 1)
-        .sort(() => 0.5 - Math.random())
-        .slice(0, 5);
-      
-      // If we don't have enough questions, get random ones
-      if (categoryQuestions.length < 5) {
-        const additionalQuestions = db.getRandomQuestionsByCategory(category, 1, 5 - categoryQuestions.length);
-        categoryQuestions.push(...additionalQuestions);
-      }
-    } else {
-      // Otherwise get random questions for this category
-      categoryQuestions = db.getRandomQuestionsByCategory(category, 1, 5);
-    }
-    
-    // Sort questions by their original clue_value to respect relative difficulty
-    categoryQuestions.sort((a, b) => {
-      // Handle cases where clue_value might be undefined or 0
-      const aValue = a.clue_value || 0;
-      const bValue = b.clue_value || 0;
-      return aValue - bValue;
+    // Set a timeout for the year range filtering
+    const timeoutPromise = new Promise(resolve => {
+      setTimeout(() => {
+        timeoutOccurred = true;
+        console.log(`Year range filtering timeout after 5 seconds`);
+        resolve([]);
+      }, 5000); // 5 second timeout
     });
     
-    // Format the questions for the game
-    const formattedQuestions = categoryQuestions.map((q, idx) => ({
-      id: uuidv4(),
-      value: (idx + 1) * 200, // Still assign standard values for the board
-      question: q.answer || 'Question not available',
-      answer: q.question || 'Answer not available',
-      revealed: false,
-      answered: false,
-      dailyDouble: false,
-      categoryIndex: board.categories.indexOf(category),
-      valueIndex: idx,
-      originalClueValue: q.clue_value || 0, // Preserve original value for reference
-      additionalInfo: {
-        airDate: q.air_date,
-        categoryComments: q.comments
-      }
-    }));
-    
-    // Add the questions to the board
-    board.questions.push(...formattedQuestions);
-  }
-  
-  // Set one question as a Daily Double for round 1
-  const eligibleQuestions = board.questions.filter(q => q.value >= 400);
-  if (eligibleQuestions.length > 0) {
-    const randomIndex = Math.floor(Math.random() * eligibleQuestions.length);
-    const dailyDoubleQuestion = eligibleQuestions[randomIndex];
-    dailyDoubleQuestion.dailyDouble = true;
-  }
-  
-  return board;
-}
-
-// Check if all questions in a board have been revealed
-function areAllQuestionsRevealed(board) {
-  return board.questions.every(q => q.revealed);
-}
-
-// Set up the Double Jeopardy round
-function setupDoubleJeopardy(board) {
-  console.log('Setting up Double Jeopardy board...');
-  
-  // Get all available categories
-  const allCategories = db.getCategories();
-  console.log(`Found ${allCategories.length} total categories for Double Jeopardy filtering`);
-  
-  // PERFORMANCE: Limit the number of categories we process to avoid hanging
-  // Shuffle first so we get a random sample
-  const shuffledAllCategories = [...allCategories].sort(() => 0.5 - Math.random());
-  const sampleCategories = shuffledAllCategories.slice(0, 1000); // Process max 1000 categories
-  
-  console.log(`Processing sample of ${sampleCategories.length} categories for Double Jeopardy`);
-  
-  // Set a timeout for category filtering to avoid hanging
-  let timeoutId;
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error('Double Jeopardy category processing timed out'));
-    }, 5000); // 5 second timeout
-  });
-  
-  // Create a promise for the category filtering process
-  const filterPromise = (async () => {
-    // Filter categories by checking if they have enough questions for round 2
-    let categoriesWithEnoughQuestions = [];
-    let count = 0;
-    
-    for (const category of sampleCategories) {
-      count++;
-      // Periodically log progress
-      if (count % 100 === 0) {
-        console.log(`Checked ${count} categories out of ${sampleCategories.length} for Double Jeopardy`);
-      }
+    // Process categories with year range filtering
+    const processingPromise = new Promise(resolve => {
+      const resultCategories = [];
       
-      const categoryName = category.category || category;
-      const questions = db.getQuestionsByCategory(categoryName).filter(q => q.round === 2);
-      
-      // Only include categories with at least 5 questions for round 2
-      if (questions.length >= 5) {
-        categoriesWithEnoughQuestions.push({
-          category: categoryName,
-          questionCount: questions.length
-        });
+      // Process categories up to the limit
+      for (const category of shuffledCategories) {
+        if (counter >= maxCategoriesToProcess || resultCategories.length >= CATEGORIES_PER_ROUND) {
+          break;
+        }
         
-        // PERFORMANCE: Once we have enough categories, stop processing more
-        if (categoriesWithEnoughQuestions.length >= 20) {
-          console.log(`Found ${categoriesWithEnoughQuestions.length} categories with enough questions for Double Jeopardy - stopping early`);
+        // Skip if already processed
+        if (processedCategories.has(category.category)) {
+          continue;
+        }
+        
+        processedCategories.add(category.category);
+        counter++;
+        
+        // Use the optimized function that uses indexes
+        const questions = db.getQuestionsByYearRangeAndRound(startYear, endYear, round);
+        
+        // Filter to just this category
+        const categoryQuestions = questions.filter(q => q.category === category.category);
+        
+        // Check if this category has enough questions
+        if (categoryQuestions.length >= CLUES_PER_CATEGORY) {
+          resultCategories.push({
+            name: category.category,
+            questions: sortQuestionsByDifficulty(categoryQuestions).slice(0, CLUES_PER_CATEGORY)
+          });
+          
+          console.log(`Found category: ${category.category} (within year range)`);
+          
+          // Stop if we have enough categories
+          if (resultCategories.length >= CATEGORIES_PER_ROUND) {
+            break;
+          }
+        }
+        
+        // Check for timeout
+        if (Date.now() - startTime > 5000) {
+          timeoutOccurred = true;
+          console.log(`Year range filtering execution timeout`);
           break;
         }
       }
-    }
-    
-    console.log(`Found ${categoriesWithEnoughQuestions.length} categories with at least 5 questions for Double Jeopardy`);
-    return categoriesWithEnoughQuestions;
-  })();
-  
-  // Race the filtering process against the timeout
-  let validCategories;
-  try {
-    validCategories = Promise.race([filterPromise, timeoutPromise]);
-    clearTimeout(timeoutId); // Clear the timeout if filtering completed successfully
-  } catch (error) {
-    console.warn(`Double Jeopardy category filtering error: ${error.message}`);
-    // Fall back to a simpler approach
-    validCategories = shuffledAllCategories.slice(0, 20);
-  }
-  
-  // Shuffle the categories and select 6 for the game
-  const shuffledCategories = validCategories.sort(() => 0.5 - Math.random());
-  const selectedCategories = shuffledCategories.slice(0, 6);
-  
-  // Create a new board for Double Jeopardy round
-  const doubleJeopardyBoard = {
-    categories: selectedCategories.map(c => c.category || c.category),
-    questions: []
-  };
-  
-  console.log(`Selected categories for Double Jeopardy: ${doubleJeopardyBoard.categories.join(', ')}`);
-  
-  // For each category, get 5 questions for round 2
-  for (const category of doubleJeopardyBoard.categories) {
-    // Get questions for this category from round 2
-    const categoryQuestions = db.getQuestionsByCategory(category).filter(q => q.round === 2);
-    
-    console.log(`Found ${categoryQuestions.length} questions for category "${category}" in Double Jeopardy`);
-    
-    // Sort questions by their original clue_value to respect relative difficulty
-    categoryQuestions.sort((a, b) => {
-      // Handle cases where clue_value might be undefined or 0
-      const aValue = a.clue_value || 0;
-      const bValue = b.clue_value || 0;
-      return aValue - bValue;
+      
+      resolve(resultCategories);
     });
     
-    // Handle case where we don't have enough questions
-    if (categoryQuestions.length < 5) {
-      console.warn(`Not enough questions for category "${category}" in Double Jeopardy round. Creating placeholders.`);
+    // Race between timeout and processing
+    const categoriesWithinYearRange = await Promise.race([
+      timeoutPromise,
+      processingPromise
+    ]);
+    
+    categories.push(...categoriesWithinYearRange);
+    
+    console.log(`Found ${categories.length} categories with year range filter`);
+  }
+  
+  // If we don't have enough categories from year range filtering, fill with any categories
+  if (categories.length < CATEGORIES_PER_ROUND) {
+    if (yearRange) {
+      console.log(`Not enough categories found with year range. Falling back to all categories.`);
+    }
+    
+    let counter = 0;
+    startTime = Date.now(); // Reset timer for the general search
+    
+    for (const category of shuffledCategories) {
+      if (counter >= maxCategoriesToProcess || categories.length >= CATEGORIES_PER_ROUND) {
+        break;
+      }
       
-      // Format any available questions
-      for (let i = 0; i < categoryQuestions.length; i++) {
-        const q = categoryQuestions[i];
-        doubleJeopardyBoard.questions.push({
-          id: uuidv4(),
-          value: (i + 1) * 400, // Double the values for Double Jeopardy
-          question: q.answer || 'Question not available',
-          answer: q.question || 'Answer not available',
-          revealed: false,
-          answered: false,
-          dailyDouble: false,
-          categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
-          valueIndex: i,
-          originalClueValue: q.clue_value || 0, // Preserve original value for reference
-          additionalInfo: {
-            airDate: q.air_date,
-            categoryComments: q.comments
-          }
+      // Skip if already processed
+      if (processedCategories.has(category.category)) {
+        continue;
+      }
+      
+      processedCategories.add(category.category);
+      counter++;
+      
+      // Get all questions for this category and round
+      const allCategoryQuestions = db.getRandomQuestionsByCategory(category.category, round, CLUES_PER_CATEGORY);
+      
+      // Check if this category has enough questions
+      if (allCategoryQuestions.length >= CLUES_PER_CATEGORY) {
+        categories.push({
+          name: category.category,
+          questions: sortQuestionsByDifficulty(allCategoryQuestions).slice(0, CLUES_PER_CATEGORY)
         });
+        
+        console.log(`Found category: ${category.category} (general search)`);
       }
       
-      // Add placeholder questions to fill the category
-      for (let i = categoryQuestions.length; i < 5; i++) {
-        doubleJeopardyBoard.questions.push({
-          id: uuidv4(),
-          value: (i + 1) * 400,
-          question: `This $${(i + 1) * 400} Double Jeopardy question is about ${category}`,
-          answer: `What is ${category}?`,
-          revealed: false,
-          answered: false,
-          dailyDouble: false,
-          categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
-          valueIndex: i,
-          originalClueValue: 0,
-          additionalInfo: {
-            airDate: null,
-            categoryComments: null
-          }
-        });
+      // Check for timeout
+      if (Date.now() - startTime > 3000) {
+        console.log(`General category search timeout`);
+        break;
       }
-    } else {
-      // Distribute questions evenly across difficulty range
-      const totalQuestions = categoryQuestions.length;
-      const step = Math.floor(totalQuestions / 5);
-      
-      let questionsToUse = [];
-      for (let i = 0; i < 5; i++) {
-        // Pick questions that are progressively more difficult
-        const index = Math.min(i * step, totalQuestions - (5 - i));
-        questionsToUse.push(categoryQuestions[index]);
-      }
-      
-      // Format the questions for the game
-      const formattedQuestions = questionsToUse.map((q, idx) => ({
-        id: uuidv4(),
-        value: (idx + 1) * 400, // Double the values for Double Jeopardy
-        question: q.answer || 'Question not available',
-        answer: q.question || 'Answer not available',
-        revealed: false,
-        answered: false,
-        dailyDouble: false,
-        categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
-        valueIndex: idx,
-        originalClueValue: q.clue_value || 0, // Preserve original value for reference
-        additionalInfo: {
-          airDate: q.air_date,
-          categoryComments: q.comments
-        }
-      }));
-      
-      // Add the questions to the board
-      doubleJeopardyBoard.questions.push(...formattedQuestions);
     }
   }
   
-  // Set two questions as Daily Doubles for round 2
-  const eligibleQuestions = doubleJeopardyBoard.questions.filter(q => q.value >= 800);
-  if (eligibleQuestions.length >= 2) {
-    const shuffled = eligibleQuestions.sort(() => 0.5 - Math.random());
-    shuffled[0].dailyDouble = true;
-    shuffled[1].dailyDouble = true;
-  } else if (doubleJeopardyBoard.questions.length >= 2) {
-    // Fallback if we don't have enough high-value questions
-    const shuffled = doubleJeopardyBoard.questions.sort(() => 0.5 - Math.random());
-    shuffled[0].dailyDouble = true;
-    shuffled[1].dailyDouble = true;
+  // Do not create placeholder categories - if we don't have enough, return what we have
+  if (categories.length < CATEGORIES_PER_ROUND) {
+    console.log(`Warning: Only found ${categories.length} categories for round ${round}. This is fewer than the desired ${CATEGORIES_PER_ROUND}.`);
   }
   
-  console.log('Double Jeopardy board setup complete');
-  return doubleJeopardyBoard;
+  const duration = Date.now() - startTime;
+  console.log(`Final categories for round ${round}: ${categories.map(c => c.name).join(', ')}`);
+  console.log(`Time to construct categories for round ${round}: ${duration}ms`);
+  console.timeEnd(`getCategoriesForRound-${round}`);
+  
+  return categories.slice(0, categories.length);
 }
 
-// Set up the Final Jeopardy round
-function setupFinalJeopardy() {
-  // Get all categories from the database
-  const allCategories = db.getCategories();
+// Sort questions by their clue value (difficulty)
+function sortQuestionsByDifficulty(questions) {
+  return [...questions].sort((a, b) => {
+    const aValue = a.clue_value || 0;
+    const bValue = b.clue_value || 0;
+    return aValue - bValue;
+  });
+}
+
+// Shuffle array using Fisher-Yates algorithm
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+// Setup a regular Jeopardy game
+async function setupJeopardy(yearRange = null) {
+  console.time('setupJeopardy');
   
-  // Shuffle the categories and select one for Final Jeopardy
-  const shuffledCategories = allCategories.sort(() => 0.5 - Math.random());
-  const finalCategory = shuffledCategories[0].category;
+  try {
+    // Get categories specifically for the Jeopardy round (round 1)
+    const categories = await getCategoriesForRound(1, yearRange);
+    
+    if (categories.length === 0) {
+      throw new Error("Could not find any categories for Jeopardy round");
+    }
+    
+    // Format the game board
+    const board = categories.map(category => {
+      return {
+        name: category.name,
+        clues: category.questions.map((question, index) => {
+          const clueValue = ((index + 1) * 200);
+          
+          return {
+            id: question.id,
+            value: clueValue,
+            clue: question.answer,
+            response: question.question,
+            dailyDouble: false,
+            originalClueValue: question.clue_value,
+            additionalInfo: {
+              category: question.category,
+              airDate: question.air_date || null,
+              categoryComments: question.comments || null,
+              notes: question.notes || null
+            }
+          };
+        })
+      };
+    });
+    
+    // Randomly select one clue as a Daily Double
+    if (board.length > 0) {
+      const randomCategoryIndex = Math.floor(Math.random() * board.length);
+      if (board[randomCategoryIndex].clues.length > 0) {
+        const randomClueIndex = Math.floor(Math.random() * board[randomCategoryIndex].clues.length);
+        board[randomCategoryIndex].clues[randomClueIndex].dailyDouble = true;
+      }
+    }
+    
+    console.log(`Set up Jeopardy board with ${board.length} categories`);
+    console.timeEnd('setupJeopardy');
+    
+    return {
+      round: 1,
+      board
+    };
+  } catch (error) {
+    console.error('Error setting up Jeopardy game:', error);
+    throw error;
+  }
+}
+
+// Setup a Double Jeopardy game
+async function setupDoubleJeopardy(yearRange = null) {
+  console.time('setupDoubleJeopardy');
   
-  // Get a random question for this category from round 3
-  const categoryQuestions = db.getRandomQuestionsByCategory(finalCategory, 3, 1);
+  try {
+    // Get categories specifically for the Double Jeopardy round (round 2)
+    const categories = await getCategoriesForRound(2, yearRange);
+    
+    if (categories.length === 0) {
+      throw new Error("Could not find any categories for Double Jeopardy round");
+    }
+    
+    // Format the game board
+    const board = categories.map(category => {
+      return {
+        name: category.name,
+        clues: category.questions.map((question, index) => {
+          const clueValue = ((index + 1) * 400);
+          
+          return {
+            id: question.id,
+            value: clueValue,
+            clue: question.answer,
+            response: question.question,
+            dailyDouble: false,
+            originalClueValue: question.clue_value,
+            additionalInfo: {
+              category: question.category,
+              airDate: question.air_date || null,
+              categoryComments: question.comments || null,
+              notes: question.notes || null
+            }
+          };
+        })
+      };
+    });
+    
+    // Only set daily doubles if we have categories
+    if (board.length > 0) {
+      // Randomly select two clues as Daily Doubles
+      // Try to put them in different categories
+      const firstCategoryIndex = Math.floor(Math.random() * board.length);
+      if (board[firstCategoryIndex].clues.length > 0) {
+        const firstClueIndex = Math.floor(Math.random() * board[firstCategoryIndex].clues.length);
+        board[firstCategoryIndex].clues[firstClueIndex].dailyDouble = true;
+        
+        // For the second daily double, try a different category if possible
+        if (board.length > 1) {
+          let secondCategoryIndex;
+          do {
+            secondCategoryIndex = Math.floor(Math.random() * board.length);
+          } while (board.length > 1 && secondCategoryIndex === firstCategoryIndex);
+          
+          if (board[secondCategoryIndex].clues.length > 0) {
+            const secondClueIndex = Math.floor(Math.random() * board[secondCategoryIndex].clues.length);
+            board[secondCategoryIndex].clues[secondClueIndex].dailyDouble = true;
+          }
+        } else if (board[firstCategoryIndex].clues.length > 1) {
+          // If only one category, pick another clue in same category
+          let secondClueIndex;
+          do {
+            secondClueIndex = Math.floor(Math.random() * board[firstCategoryIndex].clues.length);
+          } while (secondClueIndex === firstClueIndex);
+          
+          board[firstCategoryIndex].clues[secondClueIndex].dailyDouble = true;
+        }
+      }
+    }
+    
+    console.log(`Set up Double Jeopardy board with ${board.length} categories`);
+    console.timeEnd('setupDoubleJeopardy');
+    
+    return {
+      round: 2,
+      board
+    };
+  } catch (error) {
+    console.error('Error setting up Double Jeopardy game:', error);
+    throw error;
+  }
+}
+
+// Setup Final Jeopardy
+async function setupFinalJeopardy(yearRange = null) {
+  console.time('setupFinalJeopardy');
   
-  let finalQuestion = {
-    id: uuidv4(),
-    category: finalCategory,
-    question: 'Question not available',
-    answer: 'Answer not available'
-  };
-  
-  if (categoryQuestions.length > 0) {
-    finalQuestion = {
-      id: uuidv4(),
+  try {
+    // Get categories for the Final Jeopardy round (round 3)
+    const categories = await getCategoriesForRound(3, yearRange);
+    
+    // Take the first category with a question
+    let finalCategory = null;
+    let finalQuestion = null;
+    
+    for (const category of categories) {
+      if (category.questions.length > 0) {
+        finalCategory = category.name;
+        finalQuestion = category.questions[0];
+        break;
+      }
+    }
+    
+    // If no final question was found, return an error
+    if (!finalCategory || !finalQuestion) {
+      console.error('No final Jeopardy question found.');
+      throw new Error('Could not find a valid Final Jeopardy question');
+    }
+    
+    console.log(`Set up Final Jeopardy with category: ${finalCategory}`);
+    console.timeEnd('setupFinalJeopardy');
+    
+    return {
+      round: 3,
       category: finalCategory,
-      question: categoryQuestions[0].answer || 'Question not available',
-      answer: categoryQuestions[0].question || 'Answer not available',
+      clue: finalQuestion.answer,
+      response: finalQuestion.question,
       additionalInfo: {
-        airDate: categoryQuestions[0].air_date,
-        categoryComments: categoryQuestions[0].comments
+        category: finalQuestion.category,
+        airDate: finalQuestion.air_date || null,
+        categoryComments: finalQuestion.comments || null,
+        notes: finalQuestion.notes || null
       }
     };
+  } catch (error) {
+    console.error('Error setting up Final Jeopardy:', error);
+    throw error;
   }
+}
+
+// Setup a complete Jeopardy game with all rounds
+async function setupGame(yearRange = null) {
+  console.time('setupCompleteGame');
   
-  return finalQuestion;
+  try {
+    console.log(`Setting up game ${yearRange ? `with year range ${yearRange[0]}-${yearRange[1]}` : 'with no year range'}`);
+    
+    const jeopardyRound = await setupJeopardy(yearRange);
+    const doubleJeopardyRound = await setupDoubleJeopardy(yearRange);
+    const finalJeopardyRound = await setupFinalJeopardy(yearRange);
+    
+    console.log('Game setup complete');
+    console.timeEnd('setupCompleteGame');
+    
+    return {
+      jeopardy: jeopardyRound,
+      doubleJeopardy: doubleJeopardyRound,
+      finalJeopardy: finalJeopardyRound
+    };
+  } catch (error) {
+    console.error('Error setting up complete game:', error);
+    throw error;
+  }
+}
+
+// Setup the game board with categories and questions for all rounds
+async function setupGameBoard(yearStart = null, yearEnd = null) {
+  console.time('setupGameBoard');
+  try {
+    console.log(`Setting up game board ${yearStart && yearEnd ? `with year range ${yearStart}-${yearEnd}` : 'with no year range'}`);
+    
+    // Create year range array if both values are provided
+    const yearRange = (yearStart && yearEnd) ? [parseInt(yearStart), parseInt(yearEnd)] : null;
+    
+    // Set up all rounds
+    const jeopardyRound = await setupJeopardy(yearRange);
+    const doubleJeopardyRound = await setupDoubleJeopardy(yearRange);
+    const finalJeopardyRound = await setupFinalJeopardy(yearRange);
+    
+    console.log('Game board setup complete');
+    console.timeEnd('setupGameBoard');
+    
+    return {
+      jeopardy: jeopardyRound,
+      doubleJeopardy: doubleJeopardyRound,
+      finalJeopardy: finalJeopardyRound
+    };
+  } catch (error) {
+    console.error('Error setting up game board:', error);
+    throw error;
+  }
 }
 
 module.exports = {
   generateRoomCode,
   isPlayerRejoining,
-  setupGameBoard,
-  areAllQuestionsRevealed,
+  setupJeopardy,
   setupDoubleJeopardy,
-  setupFinalJeopardy
+  setupFinalJeopardy,
+  setupGame,
+  setupGameBoard,
+  
+  // For testing
+  getCategoriesForRound,
+  CATEGORIES_PER_ROUND,
+  CLUES_PER_CATEGORY
 }; 

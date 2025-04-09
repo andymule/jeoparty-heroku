@@ -281,29 +281,54 @@ const Home = () => {
             
             // Check if we have a roomCode in the response
             if (data.roomCode) {
-              navigate(`/game/host/${data.roomCode}`);
+              console.log(`Found roomCode: ${data.roomCode}, attempting to navigate to /game/host/${data.roomCode}`);
+              setDebug(`Redirecting to /game/host/${data.roomCode}`);
+              
+              // Try to redirect with a slight delay to allow logging to complete
+              setTimeout(() => {
+                navigate(`/game/host/${data.roomCode}`);
+              }, 100);
               return;
             } else if (data.success) {
               console.log('Response indicates success but no roomCode, checking for nested data');
               // Sometimes the room code might be nested in gameState
               if (data.gameState && data.gameState.roomCode) {
-                navigate(`/game/host/${data.gameState.roomCode}`);
+                console.log(`Found nested roomCode: ${data.gameState.roomCode}, navigating`);
+                setDebug(`Redirecting to /game/host/${data.gameState.roomCode}`);
+                
+                // Try to redirect with a slight delay to allow logging to complete
+                setTimeout(() => {
+                  navigate(`/game/host/${data.gameState.roomCode}`);
+                }, 100);
+                return;
+              } else if (data.game && data.game.roomCode) {
+                console.log(`Found roomCode in game object: ${data.game.roomCode}, navigating`);
+                setDebug(`Redirecting to /game/host/${data.game.roomCode}`);
+                
+                // Try to redirect with a slight delay to allow logging to complete
+                setTimeout(() => {
+                  navigate(`/game/host/${data.game.roomCode}`);
+                }, 100);
                 return;
               }
             }
             
             console.warn(`${endpoint} returned success but no valid roomCode:`, data);
+            setDebug(`${endpoint} returned success but couldn't find roomCode in response`);
           } else {
             console.error(`${endpoint} failed, status:`, fetchResponse.status);
+            setDebug(`${endpoint} failed with status ${fetchResponse.status}`);
             try {
               const errorText = await fetchResponse.text();
               console.error(`${endpoint} error response:`, errorText);
+              setDebug(`${endpoint} error response: ${errorText.substring(0, 100)}...`);
             } catch (e) {
-              console.error(`Couldn't read error response for ${endpoint}`);
+              console.error(`Couldn't read error response for ${endpoint}`, e);
             }
           }
         } catch (fetchError) {
           console.error(`Fetch error with ${endpoint}:`, fetchError);
+          setDebug(`Fetch error with ${endpoint}: ${fetchError.message}`);
         }
       }
       

@@ -1,11 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#000000">
-  <meta name="description" content="Jeoparty - A multiplayer Jeopardy game">
-  <title>Jeoparty</title>
+  <meta charset="utf-8" />
+  <link rel="icon" href="favicon.ico" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="description" content="Jeoparty - Multiplayer Jeopardy-style game" />
+  <title>Jeoparty!</title>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Korinna:wght@400;700&display=swap" rel="stylesheet">
   <style>
     body {
@@ -19,8 +20,94 @@
       box-sizing: border-box;
     }
   </style>
+  <script>
+    // Comprehensive error prevention for development tools
+    (function() {
+      // Override console methods before any other scripts run
+      const originalConsoleLog = console.log;
+      const originalConsoleWarn = console.warn;
+      const originalConsoleError = console.error;
+      
+      // STEP 1: Filter console.error to remove source map errors 
+      console.error = function() {
+        // Completely suppress all source map errors
+        if (arguments[0] && typeof arguments[0] === 'string') {
+          const errorMsg = arguments[0].toString();
+          if (errorMsg.includes('Source map error') || 
+              errorMsg.includes('404') && errorMsg.includes('.map') ||
+              errorMsg.includes('map is undefined') ||
+              errorMsg.includes('installHook.js.map') ||
+              errorMsg.includes('react_devtools_backend_compact.js.map')) {
+            return; // Suppress the error completely
+          }
+        }
+        originalConsoleError.apply(console, arguments);
+      };
+      
+      // STEP 2: Filter console.warn to remove React Router warnings and webpack messages
+      console.warn = function() {
+        if (arguments[0] && typeof arguments[0] === 'string') {
+          const warnMsg = arguments[0].toString();
+          if (warnMsg.includes('React Router Future Flag Warning') ||
+              warnMsg.includes('[webpack-dev-server]') ||
+              warnMsg.includes('Source map error') ||
+              warnMsg.includes('NetworkError')) {
+            return; // Suppress the warning completely
+          }
+        }
+        originalConsoleWarn.apply(console, arguments);
+      };
+      
+      // STEP 3: Filter console.log to remove disconnection messages
+      console.log = function() {
+        if (arguments[0] && typeof arguments[0] === 'string') {
+          const logMsg = arguments[0].toString();
+          if (logMsg.includes('Disconnected from server') ||
+              logMsg.includes('[webpack-dev-server]') ||
+              logMsg.includes('[HMR]')) {
+            return; // Suppress these log messages
+          }
+        }
+        originalConsoleLog.apply(console, arguments);
+      };
+      
+      // STEP 4: Intercept all errors to prevent source map errors from showing in console
+      window.addEventListener('error', function(event) {
+        if (event.filename && 
+            (event.filename.includes('.map') || 
+             event.filename.includes('installHook') || 
+             event.filename.includes('react_devtools') ||
+             event.filename.includes('extension://') ||
+             event.filename.includes('anonymous code'))) {
+          event.preventDefault();
+          return false;
+        }
+      }, true);
+      
+      // STEP 5: Disable source maps in React DevTools
+      if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__) {
+        try {
+          // Attempt to modify React DevTools behavior to avoid source map requests
+          const devToolsHook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+          const originalInject = devToolsHook.inject;
+          if (originalInject) {
+            devToolsHook.inject = function(injected) {
+              if (injected && injected.rendererPackageName) {
+                // Modify to avoid source map requests
+                injected.sourceMapsDisabled = true;
+              }
+              return originalInject.apply(this, arguments);
+            };
+          }
+        } catch (e) {
+          // Ignore any errors in this experimental code
+        }
+      }
+    })();
+  </script>
 </head>
 <body>
+  <noscript>You need to enable JavaScript to run this app.</noscript>
   <div id="root"></div>
 </body>
 </html> 

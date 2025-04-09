@@ -11,9 +11,41 @@ const alternateDatasetPaths = [
   path.join(__dirname, '../../data/jeopardy_clue_dataset-main/combined_season1-40.tsv')
 ];
 
+// Added indexes for fast lookup
+const indexes = {
+  byYear: {},        // { 1990: [questionIds], 1991: [questionIds], ... }
+  byCategory: {},    // { "HISTORY": [questionIds], "SCIENCE": [questionIds], ... }
+  byRound: {         // { 1: [questionIds], 2: [questionIds], 3: [questionIds] }
+    1: [],
+    2: [],
+    3: []
+  },
+  byCategoryAndRound: {}, // { "HISTORY_1": [questionIds], "HISTORY_2": [questionIds], ... }
+  byYearAndRound: {}  // { "1990_1": [questionIds], "1990_2": [questionIds], ... }
+};
+
+// Function to reset indexes - useful for testing
+function resetIndexes() {
+  // Clear all indexes
+  Object.keys(indexes.byYear).forEach(key => delete indexes.byYear[key]);
+  Object.keys(indexes.byCategory).forEach(key => delete indexes.byCategory[key]);
+  indexes.byRound[1] = [];
+  indexes.byRound[2] = [];
+  indexes.byRound[3] = [];
+  Object.keys(indexes.byCategoryAndRound).forEach(key => delete indexes.byCategoryAndRound[key]);
+  Object.keys(indexes.byYearAndRound).forEach(key => delete indexes.byYearAndRound[key]);
+}
+
+// Function to unescape any remaining escaped quotes in a string
+function unescapeString(str) {
+  if (!str) return '';
+  return str.replace(/\\"/g, '"');
+}
+
 // Function to load the entire dataset into memory
 const loadDatasetIntoMemory = () => {
   try {
+    console.time('loadDatasetIntoMemory');
     console.log('Loading Jeopardy dataset into memory...');
     
     // Try the primary path first
@@ -41,11 +73,20 @@ const loadDatasetIntoMemory = () => {
     // In production (Heroku), limit to 10,000 questions to avoid memory issues
     const maxQuestionsInProduction = 10000;
     
+    console.time('readFile');
     const data = fs.readFileSync(filePath, 'utf8');
+    console.timeEnd('readFile');
+    console.log(`File read complete. Size: ${(data.length / 1024 / 1024).toFixed(2)} MB`);
+    
+    console.time('parseData');
     const lines = data.split('\n');
+    console.log(`Total lines in file: ${lines.length}`);
     
     // Skip header row
     let loadedCount = 0;
+    let skippedCount = 0;
+    let errorCount = 0;
+    
     for (let i = 1; i < lines.length; i++) {
       if (isProduction && loadedCount >= maxQuestionsInProduction) {
         console.log(`Reached limit of ${maxQuestionsInProduction} questions for production environment`);
@@ -53,7 +94,10 @@ const loadDatasetIntoMemory = () => {
       }
       
       const line = lines[i].trim();
-      if (!line) continue;
+      if (!line) {
+        skippedCount++;
+        continue;
+      }
       
       try {
         // Handle TSV with potential quotes by using a custom split
@@ -62,35 +106,129 @@ const loadDatasetIntoMemory = () => {
         
         if (values.length < 7) {
           // console.warn(`Skipping line ${i}: insufficient columns (${values.length})`);
+          skippedCount++;
           continue;
         }
         
-        inMemoryDataset.push({
+        const questionData = {
           id: i,
           round: parseInt(values[0]) || 0,
           clue_value: parseInt(values[1]) || 0,
           daily_double_value: parseInt(values[2]) || 0,
-          category: values[3] || 'Unknown Category',
-          comments: values[4] || '',
-          answer: values[5] || '', // This is the clue shown to contestants
-          question: values[6] || '', // This is what contestants must respond with
+          category: unescapeString(values[3]) || 'Unknown Category',
+          comments: unescapeString(values[4]) || '',
+          answer: unescapeString(values[5]) || '', // This is the clue shown to contestants
+          question: unescapeString(values[6]) || '', // This is what contestants must respond with
           air_date: values[7] || null,
-          notes: values.length > 8 ? values[8] : ''
-        });
+          notes: values.length > 8 ? unescapeString(values[8]) : ''
+        };
+        
+        inMemoryDataset.push(questionData);
+        
+        // Add to indexes as we load
+        indexQuestion(questionData);
         
         loadedCount++;
+        
+        // Log progress periodically
+        if (loadedCount % 50000 === 0) {
+          console.log(`Processed ${loadedCount} questions...`);
+        }
       } catch (lineError) {
         console.warn(`Error parsing line ${i}: ${lineError.message}`);
+        errorCount++;
       }
     }
+    console.timeEnd('parseData');
+    
+    console.time('buildIndexes');
+    // Count index sizes
+    const roundQuestions = {
+      1: indexes.byRound[1].length,
+      2: indexes.byRound[2].length,
+      3: indexes.byRound[3].length
+    };
+    console.timeEnd('buildIndexes');
     
     console.log(`Successfully loaded ${inMemoryDataset.length} questions into memory.`);
+    console.log(`Skipped ${skippedCount} lines, encountered ${errorCount} errors during parsing.`);
+    
+    // Log indexes statistics
+    console.log(`Created indexes: ${Object.keys(indexes.byYear).length} years, ${Object.keys(indexes.byCategory).length} categories`);
+    console.log(`Questions by round: Round 1: ${roundQuestions[1]}, Round 2: ${roundQuestions[2]}, Round 3: ${roundQuestions[3]}`);
+    console.timeEnd('loadDatasetIntoMemory');
+    
     return true;
   } catch (error) {
     console.error('Error loading dataset into memory:', error);
     throw error;
   }
 };
+
+// Function to add a question to all indexes
+function indexQuestion(question) {
+  const id = question.id;
+  const round = question.round;
+  const category = question.category;
+  
+  // Index by round
+  if (round > 0 && round <= 3) {
+    if (!indexes.byRound[round]) {
+      indexes.byRound[round] = [];
+    }
+    indexes.byRound[round].push(id);
+  }
+  
+  // Index by category
+  if (category) {
+    if (!indexes.byCategory[category]) {
+      indexes.byCategory[category] = [];
+    }
+    indexes.byCategory[category].push(id);
+  }
+  
+  // Index by category and round
+  if (category && round > 0 && round <= 3) {
+    const key = `${category}_${round}`;
+    if (!indexes.byCategoryAndRound[key]) {
+      indexes.byCategoryAndRound[key] = [];
+    }
+    indexes.byCategoryAndRound[key].push(id);
+  }
+  
+  // Index by year
+  if (question.air_date) {
+    let year;
+    try {
+      // Try to parse date as ISO format first (YYYY-MM-DD)
+      if (question.air_date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+        year = parseInt(question.air_date.substring(0, 4));
+      } else {
+        // Fall back to Date object parsing
+        year = new Date(question.air_date).getFullYear();
+      }
+      
+      // Only add valid years
+      if (!isNaN(year)) {
+        if (!indexes.byYear[year]) {
+          indexes.byYear[year] = [];
+        }
+        indexes.byYear[year].push(id);
+        
+        // Index by year and round
+        if (round > 0 && round <= 3) {
+          const yearRoundKey = `${year}_${round}`;
+          if (!indexes.byYearAndRound[yearRoundKey]) {
+            indexes.byYearAndRound[yearRoundKey] = [];
+          }
+          indexes.byYearAndRound[yearRoundKey].push(id);
+        }
+      }
+    } catch (error) {
+      // Skip invalid dates
+    }
+  }
+}
 
 // Helper function to split TSV line handling quoted fields
 function splitTsvLine(line) {
@@ -110,6 +248,10 @@ function splitTsvLine(line) {
     if (char === '"') {
       // Toggle quote state
       inQuotes = !inQuotes;
+    } else if (char === '\\' && i + 1 < line.length && line[i + 1] === '"') {
+      // Handle escaped quotes - add the quote without the backslash
+      current += '"';
+      i++; // Skip the next character (the quote)
     } else if (char === '\t' && !inQuotes) {
       // End of field if not in quotes
       result.push(current);
@@ -125,26 +267,44 @@ function splitTsvLine(line) {
   return result;
 }
 
+// Helper function to get questions by IDs
+const getQuestionsByIds = (ids) => {
+  return ids.map(id => inMemoryDataset.find(q => q.id === id)).filter(q => q !== undefined);
+};
+
 // Functions to query the in-memory dataset
 const getQuestionsCount = () => {
   return inMemoryDataset.length;
 };
 
 const getCategories = () => {
-  const uniqueCategories = new Set();
-  inMemoryDataset.forEach(q => uniqueCategories.add(q.category));
-  return Array.from(uniqueCategories).map(category => ({ category }));
+  // Use the indexes for faster access
+  return Object.keys(indexes.byCategory).map(category => ({ category }));
 };
 
 const getQuestionsByCategory = (categoryName) => {
-  return inMemoryDataset.filter(q => q.category === categoryName);
+  // Use the index instead of filtering the entire dataset
+  if (indexes.byCategory[categoryName]) {
+    return getQuestionsByIds(indexes.byCategory[categoryName]);
+  }
+  return [];
 };
 
 // Get random questions for a category and round
 const getRandomQuestionsByCategory = (categoryName, round, count = 5) => {
-  const questions = inMemoryDataset.filter(q => 
-    q.category === categoryName && q.round === round
-  );
+  // Use the category and round index for faster lookup
+  const key = `${categoryName}_${round}`;
+  let questions = [];
+  
+  if (indexes.byCategoryAndRound[key]) {
+    // Get all questions for this category and round
+    questions = getQuestionsByIds(indexes.byCategoryAndRound[key]);
+  } else {
+    // Fallback to filtering (should rarely happen with proper indexing)
+    questions = inMemoryDataset.filter(q => 
+      q.category === categoryName && q.round === round
+    );
+  }
   
   // First sort by clue_value to ensure relative difficulty levels are respected
   const sortedByDifficulty = questions.sort((a, b) => {
@@ -184,29 +344,41 @@ const getRandomQuestionsByCategory = (categoryName, round, count = 5) => {
 
 // Get questions by year range
 const getQuestionsByYearRange = (startYear, endYear) => {
-  return inMemoryDataset.filter(q => {
-    if (!q.air_date) return false;
-    
-    // Parse the date correctly - ensure we're handling various date formats
-    let year;
-    try {
-      // Try to parse date as ISO format first (YYYY-MM-DD)
-      if (q.air_date.match(/^\d{4}-\d{2}-\d{2}$/)) {
-        year = parseInt(q.air_date.substring(0, 4));
-      } else {
-        // Fall back to Date object parsing
-        year = new Date(q.air_date).getFullYear();
-      }
-      
-      // Handle invalid dates that return NaN
-      if (isNaN(year)) return false;
-      
-      return year >= startYear && year <= endYear;
-    } catch (error) {
-      console.warn(`Error parsing date: ${q.air_date}`, error);
-      return false;
+  console.time('getQuestionsByYearRange');
+  
+  // Use the year indexes for much faster lookup
+  const questionIds = new Set();
+  
+  // Collect all IDs for questions in the year range
+  for (let year = startYear; year <= endYear; year++) {
+    if (indexes.byYear[year]) {
+      indexes.byYear[year].forEach(id => questionIds.add(id));
     }
-  });
+  }
+  
+  const result = getQuestionsByIds(Array.from(questionIds));
+  console.timeEnd('getQuestionsByYearRange');
+  return result;
+};
+
+// Get questions by year range and round
+const getQuestionsByYearRangeAndRound = (startYear, endYear, round) => {
+  console.time('getQuestionsByYearRangeAndRound');
+  
+  // Use the year and round indexes for even faster lookup
+  const questionIds = new Set();
+  
+  // Collect all IDs for questions in the year range and round
+  for (let year = startYear; year <= endYear; year++) {
+    const key = `${year}_${round}`;
+    if (indexes.byYearAndRound[key]) {
+      indexes.byYearAndRound[key].forEach(id => questionIds.add(id));
+    }
+  }
+  
+  const result = getQuestionsByIds(Array.from(questionIds));
+  console.timeEnd('getQuestionsByYearRangeAndRound');
+  return result;
 };
 
 // Initialize the dataset
@@ -214,6 +386,9 @@ const initializeDataset = async () => {
   try {
     // If we already have data in memory (e.g., in test cases), don't reload
     if (inMemoryDataset.length > 0) {
+      // Re-index the in-memory data (in case tests added data directly)
+      resetIndexes();
+      inMemoryDataset.forEach(question => indexQuestion(question));
       console.log('Dataset initialized successfully');
       return true;
     }
@@ -233,6 +408,22 @@ const initializeDataset = async () => {
   }
 };
 
+// Add a function to add a question and index it properly
+function addQuestion(question) {
+  // If id is not provided, generate one
+  if (!question.id) {
+    question.id = inMemoryDataset.length + 1;
+  }
+  
+  // Add to in-memory dataset
+  inMemoryDataset.push(question);
+  
+  // Add to indexes
+  indexQuestion(question);
+  
+  return question;
+}
+
 module.exports = {
   initializeDataset,
   inMemoryDataset,
@@ -240,5 +431,8 @@ module.exports = {
   getCategories,
   getQuestionsByCategory,
   getRandomQuestionsByCategory,
-  getQuestionsByYearRange
+  getQuestionsByYearRange,
+  getQuestionsByYearRangeAndRound,
+  resetIndexes,
+  addQuestion  // Export the new function
 }; 
