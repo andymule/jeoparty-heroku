@@ -130,16 +130,91 @@ function areAllQuestionsRevealed(board) {
 
 // Set up the Double Jeopardy round
 function setupDoubleJeopardy(board) {
-  // Create a new board for Double Jeopardy round with same categories
+  console.log('Setting up Double Jeopardy board...');
+  
+  // Get all available categories
+  const allCategories = db.getCategories();
+  console.log(`Found ${allCategories.length} total categories for Double Jeopardy filtering`);
+  
+  // PERFORMANCE: Limit the number of categories we process to avoid hanging
+  // Shuffle first so we get a random sample
+  const shuffledAllCategories = [...allCategories].sort(() => 0.5 - Math.random());
+  const sampleCategories = shuffledAllCategories.slice(0, 1000); // Process max 1000 categories
+  
+  console.log(`Processing sample of ${sampleCategories.length} categories for Double Jeopardy`);
+  
+  // Set a timeout for category filtering to avoid hanging
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error('Double Jeopardy category processing timed out'));
+    }, 5000); // 5 second timeout
+  });
+  
+  // Create a promise for the category filtering process
+  const filterPromise = (async () => {
+    // Filter categories by checking if they have enough questions for round 2
+    let categoriesWithEnoughQuestions = [];
+    let count = 0;
+    
+    for (const category of sampleCategories) {
+      count++;
+      // Periodically log progress
+      if (count % 100 === 0) {
+        console.log(`Checked ${count} categories out of ${sampleCategories.length} for Double Jeopardy`);
+      }
+      
+      const categoryName = category.category || category;
+      const questions = db.getQuestionsByCategory(categoryName).filter(q => q.round === 2);
+      
+      // Only include categories with at least 5 questions for round 2
+      if (questions.length >= 5) {
+        categoriesWithEnoughQuestions.push({
+          category: categoryName,
+          questionCount: questions.length
+        });
+        
+        // PERFORMANCE: Once we have enough categories, stop processing more
+        if (categoriesWithEnoughQuestions.length >= 20) {
+          console.log(`Found ${categoriesWithEnoughQuestions.length} categories with enough questions for Double Jeopardy - stopping early`);
+          break;
+        }
+      }
+    }
+    
+    console.log(`Found ${categoriesWithEnoughQuestions.length} categories with at least 5 questions for Double Jeopardy`);
+    return categoriesWithEnoughQuestions;
+  })();
+  
+  // Race the filtering process against the timeout
+  let validCategories;
+  try {
+    validCategories = Promise.race([filterPromise, timeoutPromise]);
+    clearTimeout(timeoutId); // Clear the timeout if filtering completed successfully
+  } catch (error) {
+    console.warn(`Double Jeopardy category filtering error: ${error.message}`);
+    // Fall back to a simpler approach
+    validCategories = shuffledAllCategories.slice(0, 20);
+  }
+  
+  // Shuffle the categories and select 6 for the game
+  const shuffledCategories = validCategories.sort(() => 0.5 - Math.random());
+  const selectedCategories = shuffledCategories.slice(0, 6);
+  
+  // Create a new board for Double Jeopardy round
   const doubleJeopardyBoard = {
-    categories: [...board.categories],
+    categories: selectedCategories.map(c => c.category || c.category),
     questions: []
   };
   
+  console.log(`Selected categories for Double Jeopardy: ${doubleJeopardyBoard.categories.join(', ')}`);
+  
   // For each category, get 5 questions for round 2
   for (const category of doubleJeopardyBoard.categories) {
-    // Get random questions for this category from round 2
-    const categoryQuestions = db.getRandomQuestionsByCategory(category, 2, 5);
+    // Get questions for this category from round 2
+    const categoryQuestions = db.getQuestionsByCategory(category).filter(q => q.round === 2);
+    
+    console.log(`Found ${categoryQuestions.length} questions for category "${category}" in Double Jeopardy`);
     
     // Sort questions by their original clue_value to respect relative difficulty
     categoryQuestions.sort((a, b) => {
@@ -149,26 +224,83 @@ function setupDoubleJeopardy(board) {
       return aValue - bValue;
     });
     
-    // Format the questions for the game
-    const formattedQuestions = categoryQuestions.map((q, idx) => ({
-      id: uuidv4(),
-      value: (idx + 1) * 400, // Double the values for Double Jeopardy
-      question: q.answer || 'Question not available',
-      answer: q.question || 'Answer not available',
-      revealed: false,
-      answered: false,
-      dailyDouble: false,
-      categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
-      valueIndex: idx,
-      originalClueValue: q.clue_value || 0, // Preserve original value for reference
-      additionalInfo: {
-        airDate: q.air_date,
-        categoryComments: q.comments
+    // Handle case where we don't have enough questions
+    if (categoryQuestions.length < 5) {
+      console.warn(`Not enough questions for category "${category}" in Double Jeopardy round. Creating placeholders.`);
+      
+      // Format any available questions
+      for (let i = 0; i < categoryQuestions.length; i++) {
+        const q = categoryQuestions[i];
+        doubleJeopardyBoard.questions.push({
+          id: uuidv4(),
+          value: (i + 1) * 400, // Double the values for Double Jeopardy
+          question: q.answer || 'Question not available',
+          answer: q.question || 'Answer not available',
+          revealed: false,
+          answered: false,
+          dailyDouble: false,
+          categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
+          valueIndex: i,
+          originalClueValue: q.clue_value || 0, // Preserve original value for reference
+          additionalInfo: {
+            airDate: q.air_date,
+            categoryComments: q.comments
+          }
+        });
       }
-    }));
-    
-    // Add the questions to the board
-    doubleJeopardyBoard.questions.push(...formattedQuestions);
+      
+      // Add placeholder questions to fill the category
+      for (let i = categoryQuestions.length; i < 5; i++) {
+        doubleJeopardyBoard.questions.push({
+          id: uuidv4(),
+          value: (i + 1) * 400,
+          question: `This $${(i + 1) * 400} Double Jeopardy question is about ${category}`,
+          answer: `What is ${category}?`,
+          revealed: false,
+          answered: false,
+          dailyDouble: false,
+          categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
+          valueIndex: i,
+          originalClueValue: 0,
+          additionalInfo: {
+            airDate: null,
+            categoryComments: null
+          }
+        });
+      }
+    } else {
+      // Distribute questions evenly across difficulty range
+      const totalQuestions = categoryQuestions.length;
+      const step = Math.floor(totalQuestions / 5);
+      
+      let questionsToUse = [];
+      for (let i = 0; i < 5; i++) {
+        // Pick questions that are progressively more difficult
+        const index = Math.min(i * step, totalQuestions - (5 - i));
+        questionsToUse.push(categoryQuestions[index]);
+      }
+      
+      // Format the questions for the game
+      const formattedQuestions = questionsToUse.map((q, idx) => ({
+        id: uuidv4(),
+        value: (idx + 1) * 400, // Double the values for Double Jeopardy
+        question: q.answer || 'Question not available',
+        answer: q.question || 'Answer not available',
+        revealed: false,
+        answered: false,
+        dailyDouble: false,
+        categoryIndex: doubleJeopardyBoard.categories.indexOf(category),
+        valueIndex: idx,
+        originalClueValue: q.clue_value || 0, // Preserve original value for reference
+        additionalInfo: {
+          airDate: q.air_date,
+          categoryComments: q.comments
+        }
+      }));
+      
+      // Add the questions to the board
+      doubleJeopardyBoard.questions.push(...formattedQuestions);
+    }
   }
   
   // Set two questions as Daily Doubles for round 2
@@ -177,8 +309,14 @@ function setupDoubleJeopardy(board) {
     const shuffled = eligibleQuestions.sort(() => 0.5 - Math.random());
     shuffled[0].dailyDouble = true;
     shuffled[1].dailyDouble = true;
+  } else if (doubleJeopardyBoard.questions.length >= 2) {
+    // Fallback if we don't have enough high-value questions
+    const shuffled = doubleJeopardyBoard.questions.sort(() => 0.5 - Math.random());
+    shuffled[0].dailyDouble = true;
+    shuffled[1].dailyDouble = true;
   }
   
+  console.log('Double Jeopardy board setup complete');
   return doubleJeopardyBoard;
 }
 

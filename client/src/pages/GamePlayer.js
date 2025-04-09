@@ -4,6 +4,54 @@ import styled, { keyframes, css } from 'styled-components';
 import io from 'socket.io-client';
 import { loadSound, playSound, cleanupSounds, SOUNDS } from '../utils/soundUtils';
 
+// Socket event constants
+const SOCKET_EVENTS = {
+  CONNECT: 'connect',
+  CONNECT_ERROR: 'connect_error',
+  ERROR: 'error',
+  
+  // Game state events
+  GAME_JOINED: 'gameJoined',
+  PLAYER_JOINED: 'playerJoined',
+  GAME_STARTED: 'gameStarted',
+  HOST_DISCONNECTED: 'hostDisconnected',
+  GAME_ENDED: 'gameEnded',
+  GAME_NOT_FOUND: 'gameNotFound',
+  GAME_OVER: 'gameOver',
+  
+  // Question related events
+  QUESTION_SELECTED: 'questionSelected',
+  BUZZER_ENABLED: 'buzzerEnabled',
+  BUZZER_RE_ENABLED: 'buzzerReEnabled',
+  PLAYER_BUZZED: 'playerBuzzed',
+  EARLY_BUZZ: 'earlyBuzz',
+  ANSWER_JUDGED: 'answerJudged',
+  TIME_EXPIRED: 'timeExpired',
+  ALL_PLAYERS_ATTEMPTED: 'allPlayersAttempted',
+  RETURN_TO_BOARD: 'returnToBoard',
+  
+  // Round related events
+  ROUND_CHANGED: 'roundChanged',
+  
+  // Final Jeopardy events
+  FINAL_JEOPARDY: 'finalJeopardy',
+  FINAL_JEOPARDY_QUESTION: 'finalJeopardyQuestion',
+  WAGER_RECEIVED: 'wagerReceived',
+  ANSWER_RECEIVED: 'answerReceived',
+  FINAL_ANSWER_REVEALED: 'finalAnswerRevealed',
+  FINAL_ANSWER_JUDGED: 'finalAnswerJudged'
+};
+
+// Client socket emit events
+const SOCKET_EMIT = {
+  JOIN_GAME: 'joinGame',
+  BUZZ: 'buzz',
+  SUBMIT_ANSWER: 'submitAnswer',
+  SELECT_QUESTION: 'selectQuestion',
+  FINAL_JEOPARDY_WAGER: 'finalJeopardyWager',
+  FINAL_JEOPARDY_ANSWER: 'finalJeopardyAnswer'
+};
+
 const fadeIn = keyframes`
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
@@ -432,21 +480,16 @@ const GamePlayer = () => {
     setSocket(newSocket);
     
     const setupSocketListeners = () => {
-      const events = [
-        'gameJoined', 'gameStarted', 'hostDisconnected', 'gameEnded',
-        'questionSelected', 'playerBuzzed', 'answerJudged', 'gameOver',
-        'returnToBoard', 'error', 'player-buzzed', 'gameNotFound'
-      ];
-      
-      events.forEach(event => {
+      // Remove any existing listeners to avoid duplicates
+      Object.values(SOCKET_EVENTS).forEach(event => {
         newSocket.off(event);
       });
       
-      newSocket.on('connect', () => {
+      newSocket.on(SOCKET_EVENTS.CONNECT, () => {
         console.log(`Socket connected with ID: ${newSocket.id}`);
         if (savedName) {
           console.log(`Attempting to join room ${roomCode} as ${savedName}`);
-          newSocket.emit('joinGame', {
+          newSocket.emit(SOCKET_EMIT.JOIN_GAME, {
             roomCode: roomCode.toUpperCase(),
             playerName: savedName
           });
@@ -455,13 +498,13 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('connect_error', (err) => {
+      newSocket.on(SOCKET_EVENTS.CONNECT_ERROR, (err) => {
         console.error('Socket connection error:', err);
         setError(`Connection error: ${err.message}`);
         setGameState('error');
       });
       
-      newSocket.on('error', (data) => {
+      newSocket.on(SOCKET_EVENTS.ERROR, (data) => {
         console.error('Socket error:', data);
         
         // If this is a "Question already revealed" error, display a more helpful message
@@ -478,13 +521,13 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('gameNotFound', () => {
+      newSocket.on(SOCKET_EVENTS.GAME_NOT_FOUND, () => {
         console.error(`Game with code ${roomCode} not found`);
         setError(`Game with code ${roomCode} not found. Please check the room code.`);
         setGameState('error');
       });
       
-      newSocket.on('gameJoined', (data) => {
+      newSocket.on(SOCKET_EVENTS.GAME_JOINED, (data) => {
         console.log('Game joined successfully:', data);
         setGameState(data.gameState || 'waiting');
         setPlayers(data.players || []);
@@ -499,7 +542,7 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('playerJoined', (data) => {
+      newSocket.on(SOCKET_EVENTS.PLAYER_JOINED, (data) => {
         console.log('Player joined:', data);
         if (data.players) {
           setPlayers(data.players);
@@ -513,7 +556,7 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('gameStarted', (data) => {
+      newSocket.on(SOCKET_EVENTS.GAME_STARTED, (data) => {
         console.log('Game started:', data);
         setGameState('inProgress');
         if (data.categories) setCategories(data.categories);
@@ -525,19 +568,19 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('hostDisconnected', () => {
+      newSocket.on(SOCKET_EVENTS.HOST_DISCONNECTED, () => {
         console.log('Host disconnected');
         setError('The host has disconnected. Please try again later.');
         setGameState('error');
       });
       
-      newSocket.on('gameEnded', () => {
+      newSocket.on(SOCKET_EVENTS.GAME_ENDED, () => {
         console.log('Game ended');
         setError('The game has ended. Thanks for playing!');
         setGameState('error');
       });
       
-      newSocket.on('questionSelected', (data) => {
+      newSocket.on(SOCKET_EVENTS.QUESTION_SELECTED, (data) => {
         console.log('Question selected:', data);
         setCurrentQuestion(data.question);
         setShowAnswer(false);
@@ -565,7 +608,7 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('buzzerReEnabled', (data) => {
+      newSocket.on(SOCKET_EVENTS.BUZZER_RE_ENABLED, (data) => {
         console.log('Buzzer re-enabled after incorrect answer:', data);
         if (!hasBuzzed) {
           setCanBuzz(true);
@@ -578,7 +621,7 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('buzzerEnabled', (data) => {
+      newSocket.on(SOCKET_EVENTS.BUZZER_ENABLED, (data) => {
         console.log('Buzzer enabled:', data);
         setCanBuzz(true);
         
@@ -595,7 +638,7 @@ const GamePlayer = () => {
         startQuestionTimer(remainingTime);
       });
       
-      newSocket.on('allPlayersAttempted', (data) => {
+      newSocket.on(SOCKET_EVENTS.ALL_PLAYERS_ATTEMPTED, (data) => {
         console.log('All players have attempted the question:', data);
         setCanBuzz(false);
         setAnswerTimer(5);
@@ -619,7 +662,7 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('earlyBuzz', (data) => {
+      newSocket.on(SOCKET_EVENTS.EARLY_BUZZ, (data) => {
         console.log('Early buzz penalty:', data);
         setEarlyBuzzPenalty(true);
         
@@ -634,18 +677,16 @@ const GamePlayer = () => {
         }, 200);
       });
       
-      const handlePlayerBuzzed = (data) => {
+      newSocket.on(SOCKET_EVENTS.PLAYER_BUZZED, (data) => {
         console.log('Player buzzed:', data);
         if (data.player && data.player.id === newSocket.id) {
           setHasBuzzed(true);
         } else {
           setCanBuzz(false);
         }
-      };
+      });
       
-      newSocket.on('playerBuzzed', handlePlayerBuzzed);
-      
-      newSocket.on('answerJudged', (data) => {
+      newSocket.on(SOCKET_EVENTS.ANSWER_JUDGED, (data) => {
         console.log('Answer judged:', data);
         
         // Clear the answer timer
@@ -682,7 +723,7 @@ const GamePlayer = () => {
         }
       });
       
-      newSocket.on('returnToBoard', (data) => {
+      newSocket.on(SOCKET_EVENTS.RETURN_TO_BOARD, (data) => {
         console.log('Returning to board:', data);
         setGameState('inProgress');
         setCurrentQuestion(null);
@@ -704,12 +745,12 @@ const GamePlayer = () => {
         }
       });
 
-      // Add event for when time expires on a question
-      newSocket.on('timeExpired', (data) => {
+      newSocket.on(SOCKET_EVENTS.TIME_EXPIRED, (data) => {
         console.log('Time expired for question:', data);
         setCanBuzz(false);
         
-        // Play the incorrect sound
+        // Only play the sound once and only on desktop
+        console.log('GamePlayer: Time expired, playing incorrect sound');
         playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
         
         // Display a message that time expired and show the answer
@@ -723,8 +764,7 @@ const GamePlayer = () => {
         }
       });
 
-      // Add handlers for round transitions
-      newSocket.on('roundChanged', (data) => {
+      newSocket.on(SOCKET_EVENTS.ROUND_CHANGED, (data) => {
         console.log('Round changed:', data);
         
         // Show round transition screen
@@ -757,8 +797,7 @@ const GamePlayer = () => {
         }, 5000);
       });
       
-      // Add handlers for Final Jeopardy
-      newSocket.on('finalJeopardy', (data) => {
+      newSocket.on(SOCKET_EVENTS.FINAL_JEOPARDY, (data) => {
         console.log('Final Jeopardy:', data);
         
         // Show round transition screen
@@ -791,7 +830,7 @@ const GamePlayer = () => {
         }, 5000);
       });
       
-      newSocket.on('finalJeopardyQuestion', (data) => {
+      newSocket.on(SOCKET_EVENTS.FINAL_JEOPARDY_QUESTION, (data) => {
         console.log('Final Jeopardy question:', data);
         
         // Update final jeopardy state
@@ -802,7 +841,7 @@ const GamePlayer = () => {
         }));
       });
       
-      newSocket.on('wagerReceived', (data) => {
+      newSocket.on(SOCKET_EVENTS.WAGER_RECEIVED, (data) => {
         console.log('Wager received confirmation:', data);
         
         // Update final jeopardy state
@@ -812,7 +851,7 @@ const GamePlayer = () => {
         }));
       });
       
-      newSocket.on('answerReceived', (data) => {
+      newSocket.on(SOCKET_EVENTS.ANSWER_RECEIVED, (data) => {
         console.log('Final answer received confirmation:', data);
         
         // Update final jeopardy state
@@ -822,7 +861,7 @@ const GamePlayer = () => {
         }));
       });
       
-      newSocket.on('finalAnswerRevealed', (data) => {
+      newSocket.on(SOCKET_EVENTS.FINAL_ANSWER_REVEALED, (data) => {
         console.log('Final answer revealed:', data);
         
         // Update final jeopardy state
@@ -833,7 +872,7 @@ const GamePlayer = () => {
         }));
       });
       
-      newSocket.on('finalAnswerJudged', (data) => {
+      newSocket.on(SOCKET_EVENTS.FINAL_ANSWER_JUDGED, (data) => {
         console.log('Final answer judged:', data);
         
         // Play appropriate sound
@@ -854,7 +893,7 @@ const GamePlayer = () => {
         ));
       });
       
-      newSocket.on('gameOver', (data) => {
+      newSocket.on(SOCKET_EVENTS.GAME_OVER, (data) => {
         console.log('Game over:', data);
         
         // Show game over screen
@@ -918,7 +957,7 @@ const GamePlayer = () => {
     localStorage.setItem('playerName', playerName.trim());
     
     if (socket && socket.connected) {
-      socket.emit('joinGame', {
+      socket.emit(SOCKET_EMIT.JOIN_GAME, {
         roomCode: roomCode.toUpperCase(),
         playerName: playerName.trim()
       });
@@ -931,7 +970,7 @@ const GamePlayer = () => {
     if (socket && canBuzz && !hasBuzzed) {
       playSound('BUZZER').catch(e => console.log('Error playing buzzer sound:', e));
       
-      socket.emit('buzz', roomCode);
+      socket.emit(SOCKET_EMIT.BUZZ, roomCode);
       setHasBuzzed(true);
       
       // Clear question timer
@@ -949,7 +988,7 @@ const GamePlayer = () => {
     e.preventDefault();
     if (socket && hasBuzzed && answer.trim()) {
       console.log(`Submitting answer: ${answer.trim()}`);
-      socket.emit('submitAnswer', roomCode, answer.trim());
+      socket.emit(SOCKET_EMIT.SUBMIT_ANSWER, roomCode, answer.trim());
       
       // Disable form after submission
       const form = e.target;
@@ -975,7 +1014,7 @@ const GamePlayer = () => {
     }
     
     console.log(`Selecting question: category ${categoryIndex}, value ${valueIndex}`);
-    socket.emit('selectQuestion', roomCode, categoryIndex, valueIndex);
+    socket.emit(SOCKET_EMIT.SELECT_QUESTION, roomCode, categoryIndex, valueIndex);
     setCanSelectQuestion(false);
   };
   
@@ -1056,7 +1095,7 @@ const GamePlayer = () => {
     
     if (socket && socket.connected) {
       console.log(`Submitting wager: $${wagerAmount}`);
-      socket.emit('finalJeopardyWager', {
+      socket.emit(SOCKET_EMIT.FINAL_JEOPARDY_WAGER, {
         roomCode,
         wager: wagerAmount
       });
@@ -1076,7 +1115,7 @@ const GamePlayer = () => {
     
     if (socket && socket.connected) {
       console.log(`Submitting final answer: ${finalJeopardyState.answer}`);
-      socket.emit('finalJeopardyAnswer', {
+      socket.emit(SOCKET_EMIT.FINAL_JEOPARDY_ANSWER, {
         roomCode,
         answer: finalJeopardyState.answer.trim()
       });

@@ -433,7 +433,10 @@ const GameHost = () => {
         // Only handle timeout if no one has buzzed in
         if (!buzzedPlayer && socket && socket.connected) {
           console.log('Time expired - no one buzzed in');
-          socket.emit('timeExpired', roomCode);
+          
+          // Mark that the timeout was triggered by the host
+          console.log('GameHost: Playing incorrect sound from timer timeout');
+          socket.emit('timeExpired', roomCode, { fromHost: true });
           
           // Reveal the answer since no one got it
           setAnswerRevealed(true);
@@ -710,8 +713,12 @@ const GameHost = () => {
       // Automatically reveal the answer
       setAnswerRevealed(true);
       
-      // Play the incorrect sound
-      playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
+      // Only play the sound if it wasn't triggered locally from the timer
+      // This avoids duplicate sounds when both host timeout and server event occur
+      if (!data.fromHost) {
+        console.log('GameHost: Playing incorrect sound from socket event');
+        playSound('INCORRECT').catch(e => console.log('Error playing incorrect sound:', e));
+      }
       
       // Stop the timer
       setTimerRunning(false);

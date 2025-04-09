@@ -24,8 +24,13 @@ export const isDesktop = () => {
   
   const userAgent = navigator.userAgent.toLowerCase();
   
-  // Check if the device is mobile
-  const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|tablet/i.test(userAgent);
+  // More comprehensive check for mobile devices
+  const mobileRegex = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|tablet|silk|kindle|phone|samsung|huawei|xiaomi|oppo|vivo/i;
+  const isMobileDevice = mobileRegex.test(userAgent);
+  
+  // Check for mobile browsers
+  const isMobileBrowser = 
+    /mobile safari|chrome.+mobile|crios|fxios|samsung browser|ucbrowser|miui browser/i.test(userAgent);
   
   // Additional check for touch capabilities (most mobile devices have touch)
   const hasTouchScreen = (
@@ -34,9 +39,16 @@ export const isDesktop = () => {
     (navigator.msMaxTouchPoints > 0)
   );
   
-  // Consider a device desktop if it's not mobile and doesn't have touch capabilities
-  // For iPads with desktop mode, we'll still consider them mobile
-  return !isMobile && !hasTouchScreen;
+  // Check for small screen (typical for mobile)
+  const isSmallScreen = window.innerWidth < 768;
+  
+  // Check for Safari on iOS specifically
+  const isIOS = /iphone|ipad|ipod/i.test(userAgent);
+  const isSafari = /safari/i.test(userAgent) && !/chrome/i.test(userAgent);
+  const isIOSSafari = isIOS && isSafari;
+  
+  // Consider a device desktop if it passes all checks
+  return !(isMobileDevice || isMobileBrowser || hasTouchScreen || isSmallScreen || isIOSSafari);
 };
 
 /**
@@ -48,7 +60,11 @@ export const isDesktop = () => {
 export const loadSound = (soundKey) => {
   // Only load sounds on desktop
   if (!isDesktop()) {
-    console.log('Sound loading skipped on mobile device');
+    // More detailed logging for debugging mobile detection
+    const userAgent = navigator.userAgent;
+    console.log(`Sound loading skipped for '${soundKey}' on mobile device.`);
+    console.log(`User agent: ${userAgent}`);
+    console.log(`Screen size: ${window.innerWidth}x${window.innerHeight}`);
     return null;
   }
   
@@ -99,7 +115,11 @@ export const loadSound = (soundKey) => {
 export const playSound = (soundKey) => {
   // Don't play sounds on mobile devices
   if (!isDesktop()) {
-    console.log('Sound playback skipped on mobile device');
+    // More detailed logging for debugging mobile detection
+    const userAgent = navigator.userAgent;
+    console.log(`Sound playback skipped for '${soundKey}' on mobile device.`);
+    console.log(`User agent: ${userAgent}`);
+    console.log(`Screen size: ${window.innerWidth}x${window.innerHeight}`);
     return Promise.resolve(); // Return resolved promise to maintain API contract
   }
   
@@ -140,10 +160,58 @@ export const cleanupSounds = () => {
   });
 };
 
+/**
+ * Helper function to log device detection status - useful for debugging
+ * @returns {object} Device detection status
+ */
+export const debugDeviceDetection = () => {
+  if (!navigator || !navigator.userAgent) {
+    console.log('Navigator or userAgent not available');
+    return { isDesktop: true };
+  }
+  
+  const userAgent = navigator.userAgent.toLowerCase();
+  
+  const mobileRegex = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|tablet|silk|kindle|phone|samsung|huawei|xiaomi|oppo|vivo/i;
+  const isMobileDevice = mobileRegex.test(userAgent);
+  
+  const isMobileBrowser = 
+    /mobile safari|chrome.+mobile|crios|fxios|samsung browser|ucbrowser|miui browser/i.test(userAgent);
+  
+  const hasTouchScreen = (
+    ('ontouchstart' in window) ||
+    (navigator.maxTouchPoints > 0) ||
+    (navigator.msMaxTouchPoints > 0)
+  );
+  
+  const isSmallScreen = window.innerWidth < 768;
+  
+  const isIOS = /iphone|ipad|ipod/i.test(userAgent);
+  const isSafari = /safari/i.test(userAgent) && !/chrome/i.test(userAgent);
+  const isIOSSafari = isIOS && isSafari;
+  
+  const deviceInfo = {
+    userAgent,
+    screenSize: `${window.innerWidth}x${window.innerHeight}`,
+    isMobileDevice,
+    isMobileBrowser,
+    hasTouchScreen,
+    isSmallScreen,
+    isIOS,
+    isSafari,
+    isIOSSafari,
+    isDesktop: !(isMobileDevice || isMobileBrowser || hasTouchScreen || isSmallScreen || isIOSSafari)
+  };
+  
+  console.table(deviceInfo);
+  return deviceInfo;
+};
+
 export default {
   SOUNDS,
   loadSound,
   playSound,
   cleanupSounds,
-  isDesktop
+  isDesktop,
+  debugDeviceDetection
 }; 

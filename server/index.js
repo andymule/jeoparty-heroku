@@ -265,7 +265,7 @@ async function setupGameBoard(roomCode) {
   }
   
   try {
-    console.log(`Setting up game board for room ${roomCode}...`);
+    console.log(`Setting up game board for room ${roomCode} for round ${gameState.round}...`);
     
     // Get all available categories - always use in-memory dataset
     const allCategories = getCategories();
@@ -277,31 +277,121 @@ async function setupGameBoard(roomCode) {
     
     console.log(`Found ${allCategories.length} total categories in dataset`);
     
+    // PERFORMANCE: Limit the number of categories we process to avoid hanging
+    // Shuffle first so we get a random sample
+    const shuffledAllCategories = [...allCategories].sort(() => 0.5 - Math.random());
+    const sampleCategories = shuffledAllCategories.slice(0, 1000); // Process max 1000 categories
+    
+    console.log(`Processing sample of ${sampleCategories.length} categories for better performance`);
+    
+    // Set a timeout to avoid hanging
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error('Category processing timed out. Using random categories instead.'));
+      }, 5000); // 5 second timeout
+    });
+    
+    // Create a promise for the category filtering process
+    const filterPromise = (async () => {
+      // Filter categories by checking if they have enough questions for this round
+      let categoriesWithEnoughQuestions = [];
+      const roundNumber = gameState.round; // 1 for single jeopardy, 2 for double jeopardy
+      
+      for (const category of sampleCategories) {
+        const categoryName = category.category || category;
+        const questions = getQuestionsByCategory(categoryName).filter(q => q.round === roundNumber);
+        
+        // Only include categories with at least 5 questions for this round
+        if (questions.length >= 5) {
+          categoriesWithEnoughQuestions.push({
+            category: categoryName,
+            questionCount: questions.length
+          });
+          
+          // PERFORMANCE: Once we have enough categories, stop processing more
+          if (categoriesWithEnoughQuestions.length >= 20) {
+            console.log(`Found ${categoriesWithEnoughQuestions.length} categories with enough questions - stopping early for performance`);
+            break;
+          }
+        }
+      }
+      
+      console.log(`Found ${categoriesWithEnoughQuestions.length} categories with at least 5 questions for round ${roundNumber}`);
+      
+      return categoriesWithEnoughQuestions;
+    })();
+    
+    // Race the filtering process against the timeout
+    let filteredCategories;
+    try {
+      filteredCategories = await Promise.race([filterPromise, timeoutPromise]);
+      // Clear the timeout if filtering completed successfully
+      clearTimeout(timeoutId);
+    } catch (error) {
+      console.warn(`Category filtering error: ${error.message}`);
+      // Fall back to a simple approach: just take random categories and filter them later
+      filteredCategories = shuffledAllCategories.slice(0, 20);
+    }
+    
     // Optional filtering by year range
-    let filteredCategories = allCategories;
-    if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
-      // Filter in-memory dataset by year range
+    if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end && filteredCategories.length >= 10) {
       const startYear = parseInt(gameState.yearRange.start);
       const endYear = parseInt(gameState.yearRange.end);
       
       console.log(`Filtering questions by year range: ${startYear}-${endYear}`);
       
-      // Get filtered questions by year range
-      const filteredQuestions = getQuestionsByYearRange(startYear, endYear);
-      console.log(`Found ${filteredQuestions.length} questions in year range ${startYear}-${endYear}`);
-      
-      // Extract unique categories from filtered dataset
-      const uniqueCategories = new Set();
-      filteredQuestions.forEach(q => uniqueCategories.add(q.category));
-      filteredCategories = Array.from(uniqueCategories).map(category => ({ category }));
-      
-      console.log(`Found ${filteredCategories.length} unique categories in year range ${startYear}-${endYear}`);
+      try {
+        // This operation can be expensive, so wrap it in a timeout as well
+        const yearFilterPromise = new Promise(async (resolve) => {
+          // Get filtered questions by year range
+          const filteredQuestions = getQuestionsByYearRange(startYear, endYear);
+          
+          // Only keep questions for this round
+          const roundFilteredQuestions = filteredQuestions.filter(q => q.round === gameState.round);
+          console.log(`Found ${roundFilteredQuestions.length} questions for round ${gameState.round} in year range ${startYear}-${endYear}`);
+          
+          // Count questions per category (limit to categories we've already filtered for performance)
+          const categoryQuestionCounts = {};
+          const categoriesToCheck = filteredCategories.map(c => c.category || c);
+          
+          roundFilteredQuestions.forEach(q => {
+            if (categoriesToCheck.includes(q.category)) {
+              if (!categoryQuestionCounts[q.category]) {
+                categoryQuestionCounts[q.category] = 0;
+              }
+              categoryQuestionCounts[q.category]++;
+            }
+          });
+          
+          // Keep only categories with at least 5 questions
+          const validCategories = Object.keys(categoryQuestionCounts)
+            .filter(cat => categoryQuestionCounts[cat] >= 5)
+            .map(cat => ({ category: cat, questionCount: categoryQuestionCounts[cat] }));
+          
+          console.log(`Found ${validCategories.length} categories with at least 5 questions in year range ${startYear}-${endYear} for round ${gameState.round}`);
+          
+          resolve(validCategories.length >= 6 ? validCategories : filteredCategories);
+        });
+        
+        const yearFilterTimeoutPromise = new Promise((resolve) => {
+          setTimeout(() => {
+            console.warn(`Year filtering timed out - using already filtered categories`);
+            resolve(filteredCategories);
+          }, 3000); // 3 second timeout
+        });
+        
+        filteredCategories = await Promise.race([yearFilterPromise, yearFilterTimeoutPromise]);
+      } catch (error) {
+        console.warn(`Year filtering error: ${error.message} - using already filtered categories`);
+        // Keep existing filtered categories
+      }
     }
     
     if (filteredCategories.length < 6) {
-      console.warn(`Warning: Only found ${filteredCategories.length} categories after filtering, which is less than the 6 required.`);
-      console.warn(`Using unfiltered categories to ensure enough content.`);
-      filteredCategories = allCategories;
+      console.warn(`Not enough categories (${filteredCategories.length}) with sufficient questions for round ${gameState.round}. Using random categories instead.`);
+      // Fall back to random categories instead of throwing an error
+      filteredCategories = shuffledAllCategories.slice(0, 20);
     }
     
     // Randomly select 6 categories
@@ -318,15 +408,10 @@ async function setupGameBoard(roomCode) {
     
     // Populate board with questions for each category
     for (const category of gameState.categories) {
-      // Get questions from in-memory dataset
-      let categoryQuestions = getQuestionsByCategory(category);
+      // Get questions from in-memory dataset for this specific category and round
+      let categoryQuestions = getQuestionsByCategory(category).filter(q => q.round === gameState.round);
       
-      if (!categoryQuestions || categoryQuestions.length === 0) {
-        console.warn(`No questions found for category "${category}". Creating placeholder questions.`);
-        categoryQuestions = [];
-      } else {
-        console.log(`Found ${categoryQuestions.length} questions for category "${category}"`);
-      }
+      console.log(`Found ${categoryQuestions.length} questions for category "${category}" in round ${gameState.round}`);
       
       // Apply year range filter if needed
       if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
@@ -339,36 +424,76 @@ async function setupGameBoard(roomCode) {
           return year >= startYear && year <= endYear;
         });
         
-        console.log(`After year filtering: ${categoryQuestions.length} questions for category "${category}"`);
+        console.log(`After year filtering: ${categoryQuestions.length} questions for category "${category}" in round ${gameState.round}`);
       }
       
-      // Filter by round
-      categoryQuestions = categoryQuestions.filter(q => q.round === gameState.round);
-      console.log(`After round filtering: ${categoryQuestions.length} questions for round ${gameState.round} in category "${category}"`);
+      // Sort by value and select 5 questions
+      categoryQuestions.sort((a, b) => {
+        // Handle cases where clue_value might be undefined or 0
+        const aValue = a.clue_value || 0;
+        const bValue = b.clue_value || 0;
+        return aValue - bValue;
+      });
       
-      // Sort by value and select 5 questions (or fewer if not enough available)
-      categoryQuestions.sort((a, b) => a.clue_value - b.clue_value);
-      
-      // If not enough questions, we'll need to adapt
+      // Initialize board for this category
       gameState.board[category] = [];
       
-      // Add questions to the board
-      for (let i = 0; i < 5; i++) {
-        const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+      // Fallback: If not enough questions for this category, create placeholder questions
+      if (categoryQuestions.length < 5) {
+        console.warn(`Not enough questions (${categoryQuestions.length}) for category "${category}" in round ${gameState.round}. Creating placeholders.`);
         
-        // Find a suitable question with appropriate value
-        const suitableQuestions = categoryQuestions.filter(q => 
-          q.clue_value === value || (q.clue_value === 0 && q.round === gameState.round)
-        );
-        
-        if (suitableQuestions.length > 0) {
-          // Randomly select one question
-          const question = suitableQuestions[Math.floor(Math.random() * suitableQuestions.length)];
+        // Add any real questions we have
+        for (let i = 0; i < categoryQuestions.length; i++) {
+          const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+          const question = categoryQuestions[i];
           
-          // Mark one random question as a daily double
+          gameState.board[category].push({
+            id: question.id,
+            value,
+            question: question.answer, // Question is actually the clue shown to players
+            answer: question.question, // Answer is what players must respond with
+            revealed: false,
+            isDaily: false,
+            originalClueValue: question.clue_value || 0 // Store original value for reference
+          });
+        }
+        
+        // Fill in the rest with placeholders
+        for (let i = categoryQuestions.length; i < 5; i++) {
+          const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+          
+          gameState.board[category].push({
+            id: `placeholder-${category}-${i}`,
+            value,
+            question: `This ${value} question is about ${category}`,
+            answer: `What is ${category}?`,
+            revealed: false,
+            isDaily: false
+          });
+        }
+      } else {
+        // Determine question distribution to maintain relative difficulty
+        // Distribute questions evenly across difficulty range
+        const totalQuestions = categoryQuestions.length;
+        const step = Math.floor(totalQuestions / 5);
+        
+        let questionsToUse = [];
+        for (let i = 0; i < 5; i++) {
+          // Pick questions that are progressively more difficult
+          const index = Math.min(i * step, totalQuestions - (5 - i));
+          questionsToUse.push(categoryQuestions[index]);
+        }
+        
+        // Add questions to the board with appropriate values
+        for (let i = 0; i < 5; i++) {
+          const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+          const question = questionsToUse[i];
+          
+          // Check if this should be a daily double
           const isDaily = 
-            (gameState.round === 1 && Math.random() < 0.05 && !gameState.board.dailyDouble) ||
-            (gameState.round === 2 && Math.random() < 0.1 && gameState.board.dailyDoubleCount < 2);
+            (gameState.round === 1 && i >= 2 && Math.random() < 0.05 && !gameState.board.dailyDouble) ||
+            (gameState.round === 2 && i >= 1 && Math.random() < 0.1 && 
+             (!gameState.board.dailyDoubleCount || gameState.board.dailyDoubleCount < 2));
           
           if (isDaily) {
             if (gameState.round === 1) {
@@ -391,18 +516,8 @@ async function setupGameBoard(roomCode) {
             question: question.answer, // Question is actually the clue shown to players
             answer: question.question, // Answer is what players must respond with
             revealed: false,
-            isDaily
-          });
-        } else {
-          // If no suitable question, create an empty slot
-          console.warn(`No suitable question found for value $${value} in category "${category}". Creating placeholder.`);
-          gameState.board[category].push({
-            id: null,
-            value,
-            question: "No question available",
-            answer: "No answer available",
-            revealed: true, // Mark as revealed so it can't be selected
-            isDaily: false
+            isDaily,
+            originalClueValue: question.clue_value || 0 // Store original value for reference
           });
         }
       }
@@ -1682,7 +1797,8 @@ io.on('connection', (socket) => {
           // Emit timeout event
           io.to(roomCode).emit('timeExpired', {
             question: game.currentQuestion,
-            answer: game.currentQuestion.answer
+            answer: game.currentQuestion.answer,
+            fromHost: false
           });
           
           // After 3 seconds, return to the board with the last correct player as the selecting player
@@ -1695,7 +1811,7 @@ io.on('connection', (socket) => {
   });
   
   // When time expires for a question without any buzzes
-  socket.on('timeExpired', (roomCode) => {
+  socket.on('timeExpired', (roomCode, options = {}) => {
     console.log(`Time expired for question in room ${roomCode}`);
     
     if (!roomCode) {
@@ -1730,7 +1846,8 @@ io.on('connection', (socket) => {
     // Emit the correct answer to all players
     io.to(roomCode).emit('timeExpired', {
       question: game.currentQuestion,
-      answer: game.currentQuestion.answer
+      answer: game.currentQuestion.answer,
+      fromHost: options.fromHost || false
     });
     
     // After 3 seconds, return to the board
@@ -1842,7 +1959,8 @@ io.on('connection', (socket) => {
           // Show the correct answer to all players
           io.to(roomCode).emit('timeExpired', {
             question: game.currentQuestion,
-            answer: game.currentQuestion.answer
+            answer: game.currentQuestion.answer,
+            fromHost: false
           });
           
           // After 3 seconds, return to the board
@@ -1859,7 +1977,8 @@ io.on('connection', (socket) => {
       // Show the correct answer to all players
       io.to(roomCode).emit('timeExpired', {
         question: game.currentQuestion,
-        answer: game.currentQuestion.answer
+        answer: game.currentQuestion.answer,
+        fromHost: false
       });
       
       // After 3 seconds, return to the board

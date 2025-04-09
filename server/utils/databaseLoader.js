@@ -138,10 +138,33 @@ async function loadGameByDate(date) {
     ['round1', 'round2'].forEach(roundKey => {
       const roundNum = roundKey === 'round1' ? 1 : 2;
       
-      // Add more categories if needed
-      while (gameData[roundKey].categories.length < 6) {
-        // Get a random category that's not already in this round
-        const randomCategory = allCategories[Math.floor(Math.random() * allCategories.length)];
+      // Get all categories that have at least 5 questions for this round
+      const categoriesWithEnoughQuestions = [];
+      const allCategories = Array.from(new Set(inMemoryDataset.map(q => q.category)));
+      
+      for (const category of allCategories) {
+        const roundQuestions = inMemoryDataset.filter(q => 
+          q.category === category && q.round === roundNum
+        );
+        
+        if (roundQuestions.length >= 5) {
+          categoriesWithEnoughQuestions.push(category);
+        }
+      }
+      
+      console.log(`Found ${categoriesWithEnoughQuestions.length} categories with at least 5 questions for round ${roundNum}`);
+      
+      if (categoriesWithEnoughQuestions.length < 6) {
+        console.warn(`Not enough categories with sufficient questions for round ${roundNum}. Using all available categories.`);
+      }
+      
+      // Shuffle the categories with enough questions and select 6
+      const shuffledCategories = categoriesWithEnoughQuestions.sort(() => 0.5 - Math.random());
+      
+      // Add categories until we have 6
+      while (gameData[roundKey].categories.length < 6 && shuffledCategories.length > 0) {
+        const randomCategory = shuffledCategories.pop();
+        
         if (!gameData[roundKey].categories.includes(randomCategory)) {
           gameData[roundKey].categories.push(randomCategory);
           
@@ -150,36 +173,106 @@ async function loadGameByDate(date) {
             q.category === randomCategory && q.round === roundNum
           );
           
-          if (categoryQuestions.length > 0) {
+          if (categoryQuestions.length >= 5) {
             gameData[roundKey].board[randomCategory] = [];
             
-            // Take up to 5 questions, or generate synthetic ones if needed
+            // Sort questions by clue_value to maintain difficulty progression
+            const sortedQuestions = [...categoryQuestions].sort((a, b) => {
+              // Handle cases where clue_value might be undefined or 0
+              const aValue = a.clue_value || 0;
+              const bValue = b.clue_value || 0;
+              return aValue - bValue;
+            });
+            
+            // Distribute questions evenly across difficulty range
+            const totalQuestions = sortedQuestions.length;
+            const step = Math.floor(totalQuestions / 5);
+            
+            let questionsToUse = [];
+            for (let i = 0; i < 5; i++) {
+              // Pick questions that are progressively more difficult
+              const index = Math.min(i * step, totalQuestions - (5 - i));
+              questionsToUse.push(sortedQuestions[index]);
+            }
+            
+            // Take 5 questions with appropriate values
             for (let i = 0; i < 5; i++) {
               const value = roundKey === 'round1' ? (i + 1) * 200 : (i + 1) * 400;
               
-              if (i < categoryQuestions.length) {
-                gameData[roundKey].board[randomCategory].push({
-                  text: categoryQuestions[i].answer,
-                  answer: categoryQuestions[i].question,
-                  value: value,
-                  revealed: false
-                });
-              } else {
-                gameData[roundKey].board[randomCategory].push({
-                  text: `Clue for ${randomCategory} worth $${value}`,
-                  answer: `What is the answer to ${randomCategory} for $${value}?`,
-                  value: value,
-                  revealed: false
-                });
-              }
+              gameData[roundKey].board[randomCategory].push({
+                text: questionsToUse[i].answer,
+                answer: questionsToUse[i].question,
+                value: value,
+                revealed: false
+              });
+            }
+          } else {
+            // This shouldn't happen since we filtered categories, but just in case
+            console.warn(`Unexpectedly found fewer than 5 questions for category ${randomCategory} in round ${roundNum}.`);
+            
+            // Try to find a different category
+            gameData[roundKey].categories.pop();
+          }
+        }
+      }
+      
+      // If we still don't have 6 categories, we'll have to use categories with fewer questions
+      if (gameData[roundKey].categories.length < 6) {
+        console.warn(`Could not find 6 categories with 5 questions each for round ${roundNum}. Using categories with fewer questions.`);
+        
+        const remainingCategories = allCategories.filter(cat => 
+          !gameData[roundKey].categories.includes(cat) && 
+          inMemoryDataset.some(q => q.category === cat && q.round === roundNum)
+        );
+        
+        // Shuffle the remaining categories
+        const shuffledRemaining = remainingCategories.sort(() => 0.5 - Math.random());
+        
+        while (gameData[roundKey].categories.length < 6 && shuffledRemaining.length > 0) {
+          const randomCategory = shuffledRemaining.pop();
+          
+          gameData[roundKey].categories.push(randomCategory);
+          gameData[roundKey].board[randomCategory] = [];
+          
+          // Get whatever questions are available for this category and round
+          const availableQuestions = inMemoryDataset.filter(q => 
+            q.category === randomCategory && q.round === roundNum
+          );
+          
+          // Sort by clue_value
+          const sortedQuestions = [...availableQuestions].sort((a, b) => {
+            const aValue = a.clue_value || 0;
+            const bValue = b.clue_value || 0;
+            return aValue - bValue;
+          });
+          
+          // Use available questions, filling in with synthetic ones as needed
+          for (let i = 0; i < 5; i++) {
+            const value = roundKey === 'round1' ? (i + 1) * 200 : (i + 1) * 400;
+            
+            if (i < sortedQuestions.length) {
+              gameData[roundKey].board[randomCategory].push({
+                text: sortedQuestions[i].answer,
+                answer: sortedQuestions[i].question,
+                value: value,
+                revealed: false
+              });
+            } else {
+              gameData[roundKey].board[randomCategory].push({
+                text: `Clue for ${randomCategory} worth $${value}`,
+                answer: `What is the answer to ${randomCategory} for $${value}?`,
+                value: value,
+                revealed: false
+              });
             }
           }
         }
       }
       
-      // Ensure each category has 5 questions
+      // Ensure each category has 5 questions (should now be guaranteed by the logic above)
       gameData[roundKey].categories.forEach(category => {
         if (!gameData[roundKey].board[category]) {
+          console.error(`Missing board data for category ${category} in round ${roundNum}.`);
           gameData[roundKey].board[category] = [];
         }
         

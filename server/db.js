@@ -146,11 +146,40 @@ const getRandomQuestionsByCategory = (categoryName, round, count = 5) => {
     q.category === categoryName && q.round === round
   );
   
-  // Shuffle the questions
-  const shuffled = questions.sort(() => 0.5 - Math.random());
+  // First sort by clue_value to ensure relative difficulty levels are respected
+  const sortedByDifficulty = questions.sort((a, b) => {
+    // Handle cases where clue_value might be undefined or 0
+    const aValue = a.clue_value || 0;
+    const bValue = b.clue_value || 0;
+    return aValue - bValue;
+  });
   
-  // Return the requested number or all if less
-  return shuffled.slice(0, count);
+  // If we have more questions than needed, pick consecutive questions from the sorted list
+  // to maintain difficulty progression
+  if (sortedByDifficulty.length > count) {
+    // Try to pick questions evenly distributed across the difficulty range
+    const step = Math.max(1, Math.floor(sortedByDifficulty.length / count));
+    const result = [];
+    
+    for (let i = 0; i < count && i * step < sortedByDifficulty.length; i++) {
+      result.push(sortedByDifficulty[i * step]);
+    }
+    
+    // Fill any remaining slots with questions not yet selected
+    while (result.length < count && result.length < sortedByDifficulty.length) {
+      const remaining = sortedByDifficulty.filter(q => !result.includes(q));
+      if (remaining.length > 0) {
+        result.push(remaining[0]);
+      } else {
+        break;
+      }
+    }
+    
+    return result;
+  }
+  
+  // Return all questions if we don't have enough
+  return sortedByDifficulty;
 };
 
 // Get questions by year range
