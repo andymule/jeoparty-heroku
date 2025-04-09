@@ -332,7 +332,8 @@ async function setupGameBoard(roomCode) {
             });
             
             // PERFORMANCE: Once we have enough categories, stop processing more
-            if (categoriesWithEnoughQuestions.length >= 10) {
+            // Increase to 30 to ensure we have enough even after filtering
+            if (categoriesWithEnoughQuestions.length >= 30) {
               console.log(`Found ${categoriesWithEnoughQuestions.length} categories with enough questions - stopping early for performance`);
               break;
             }
@@ -340,7 +341,7 @@ async function setupGameBoard(roomCode) {
         }
         
         // Break from outer loop too if we have enough categories
-        if (categoriesWithEnoughQuestions.length >= 10) {
+        if (categoriesWithEnoughQuestions.length >= 30) {
           break;
         }
       }
@@ -409,7 +410,7 @@ async function setupGameBoard(roomCode) {
                 });
                 
                 // Once we have enough categories, stop processing more
-                if (validCategories.length >= 6) {
+                if (validCategories.length >= 8) { // Increase to 8 to ensure we get enough
                   console.log(`Found ${validCategories.length} categories with enough questions in year range - stopping early`);
                   break;
                 }
@@ -417,7 +418,7 @@ async function setupGameBoard(roomCode) {
             }
             
             // If we've found enough categories, stop processing batches
-            if (validCategories.length >= 6) break;
+            if (validCategories.length >= 8) break;
           }
           
           console.log(`Found ${validCategories.length} categories with at least 5 questions in year range ${startYear}-${endYear} for round ${gameState.round}`);
@@ -441,10 +442,54 @@ async function setupGameBoard(roomCode) {
       }
     }
     
+    // Ensure we have enough categories
     if (filteredCategories.length < 6) {
-      console.warn(`Not enough categories (${filteredCategories.length}) with sufficient questions for round ${gameState.round}. Using random categories instead.`);
-      // Fall back to random categories instead of throwing an error
-      filteredCategories = shuffledAllCategories.slice(0, 20);
+      console.warn(`Not enough categories (${filteredCategories.length}) with sufficient questions for round ${gameState.round}. Processing more categories to find valid ones.`);
+      
+      // Process more categories instead of creating synthetic ones
+      let additionalCategories = [];
+      const remainingCategories = shuffledAllCategories.filter(cat => 
+        !filteredCategories.some(fc => (fc.category || fc) === (cat.category || cat))
+      );
+      
+      // Process in batches to avoid hanging
+      const maxBatches = 5;
+      const batchSize = 50;
+      
+      for (let batch = 0; batch < maxBatches && filteredCategories.length + additionalCategories.length < 6; batch++) {
+        const batchStart = batch * batchSize;
+        const batchCategories = remainingCategories.slice(batchStart, batchStart + batchSize);
+        
+        // Skip if no more categories to process
+        if (batchCategories.length === 0) break;
+        
+        console.log(`Processing additional batch ${batch + 1} with ${batchCategories.length} categories`);
+        
+        for (const category of batchCategories) {
+          const categoryName = category.category || category;
+          const questions = getQuestionsByCategory(categoryName).filter(q => q.round === gameState.round);
+          
+          if (questions.length >= 5) {
+            additionalCategories.push({
+              category: categoryName,
+              questionCount: questions.length
+            });
+            
+            if (filteredCategories.length + additionalCategories.length >= 6) {
+              break;
+            }
+          }
+        }
+      }
+      
+      // Add the additional categories
+      filteredCategories = [...filteredCategories, ...additionalCategories];
+    }
+
+    // If we still don't have enough categories, we need to abort or restart the process
+    if (filteredCategories.length < 6) {
+      console.error(`Failed to find 6 categories with at least 5 questions each. Found ${filteredCategories.length}.`);
+      throw new Error(`Could not find enough valid categories for the game. Try adjusting year range or restarting.`);
     }
     
     // Randomly select 6 categories
@@ -458,6 +503,24 @@ async function setupGameBoard(roomCode) {
     
     // Initialize board with empty questions
     gameState.board = {};
+    
+    // Verify we have exactly 6 categories
+    if (gameState.categories.length !== 6) {
+      console.error(`Failed to create exactly 6 categories. Adding synthetic ones to complete the board.`);
+      
+      // Add missing categories to reach exactly 6
+      while (gameState.categories.length < 6) {
+        const syntheticCategory = `CATEGORY ${gameState.categories.length + 1}`;
+        if (!gameState.categories.includes(syntheticCategory)) {
+          gameState.categories.push(syntheticCategory);
+        }
+      }
+      
+      // Trim if we somehow got more than 6
+      if (gameState.categories.length > 6) {
+        gameState.categories = gameState.categories.slice(0, 6);
+      }
+    }
     
     // Global timeout for the board population
     const populationPromise = (async () => {
@@ -495,36 +558,56 @@ async function setupGameBoard(roomCode) {
         
         // Fallback: If not enough questions for this category, create placeholder questions
         if (categoryQuestions.length < 5) {
-          console.warn(`Not enough questions (${categoryQuestions.length}) for category "${category}" in round ${gameState.round}. Creating placeholders.`);
+          console.warn(`Not enough questions (${categoryQuestions.length}) for category "${category}" in round ${gameState.round}. Skipping this category.`);
           
-          // Add any real questions we have
-          for (let i = 0; i < categoryQuestions.length; i++) {
-            const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
-            const question = categoryQuestions[i];
+          // Instead of creating synthetic questions, we'll replace this category with a new one
+          const remainingCategories = shuffledAllCategories.filter(cat => 
+            !gameState.categories.includes(cat.category || cat)
+          );
+          
+          // Find a replacement category with enough questions
+          let replacementFound = false;
+          for (const newCategory of remainingCategories) {
+            const newCategoryName = newCategory.category || newCategory;
+            const newCategoryQuestions = getQuestionsByCategory(newCategoryName).filter(q => q.round === gameState.round);
             
-            gameState.board[category].push({
-              id: question.id,
-              value,
-              question: question.answer, // Question is actually the clue shown to players
-              answer: question.question, // Answer is what players must respond with
-              revealed: false,
-              isDaily: false,
-              originalClueValue: question.clue_value || 0 // Store original value for reference
-            });
+            if (newCategoryQuestions.length >= 5) {
+              console.log(`Replacing category "${category}" with "${newCategoryName}" which has ${newCategoryQuestions.length} questions`);
+              
+              // Replace the category in the game state
+              const categoryIndex = gameState.categories.indexOf(category);
+              if (categoryIndex !== -1) {
+                gameState.categories[categoryIndex] = newCategoryName;
+              }
+              
+              // Set up the questions for this category
+              gameState.board[newCategoryName] = [];
+              for (let i = 0; i < 5; i++) {
+                const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+                const question = newCategoryQuestions[i];
+                
+                gameState.board[newCategoryName].push({
+                  id: question.id,
+                  value,
+                  question: question.answer, // The clue shown to contestants
+                  answer: question.question, // What contestants must respond with
+                  revealed: false,
+                  isDaily: false,
+                  originalClueValue: question.clue_value || 0
+                });
+              }
+              
+              // Remove the old category from the board
+              delete gameState.board[category];
+              replacementFound = true;
+              break;
+            }
           }
           
-          // Fill in the rest with placeholders
-          for (let i = categoryQuestions.length; i < 5; i++) {
-            const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
-            
-            gameState.board[category].push({
-              id: `placeholder-${category}-${i}`,
-              value,
-              question: `This ${value} question is about ${category}`,
-              answer: `What is ${category}?`,
-              revealed: false,
-              isDaily: false
-            });
+          // If no replacement found, this is a critical error
+          if (!replacementFound) {
+            console.error(`Could not find replacement for category "${category}". Cannot proceed.`);
+            throw new Error(`Failed to find a valid replacement category with 5 questions.`);
           }
         } else {
           // Determine question distribution to maintain relative difficulty
@@ -596,21 +679,55 @@ async function setupGameBoard(roomCode) {
       // Create simplified board with basic questions if timeout occurred
       for (const category of gameState.categories) {
         if (!gameState.board[category] || gameState.board[category].length < 5) {
-          console.log(`Creating simplified questions for category ${category}`);
-          gameState.board[category] = [];
+          console.log(`Category ${category} doesn't have enough questions. Finding replacement category.`);
           
-          // Create simple questions for this category
-          for (let i = 0; i < 5; i++) {
-            const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+          // Find a replacement category
+          const remainingCategories = shuffledAllCategories.filter(cat => 
+            !gameState.categories.includes(cat.category || cat)
+          );
+          
+          let replacementFound = false;
+          for (const newCategory of remainingCategories) {
+            const newCategoryName = newCategory.category || newCategory;
+            const newCategoryQuestions = getQuestionsByCategory(newCategoryName).filter(q => q.round === gameState.round);
             
-            gameState.board[category].push({
-              id: `simplified-${category}-${i}`,
-              value,
-              question: `This ${value} question is about ${category}`,
-              answer: `What is ${category}?`,
-              revealed: false,
-              isDaily: false
-            });
+            if (newCategoryQuestions.length >= 5) {
+              console.log(`Replacing category "${category}" with "${newCategoryName}" which has ${newCategoryQuestions.length} questions`);
+              
+              // Replace the category in the game state
+              const categoryIndex = gameState.categories.indexOf(category);
+              if (categoryIndex !== -1) {
+                gameState.categories[categoryIndex] = newCategoryName;
+              }
+              
+              // Set up the questions for this category
+              gameState.board[newCategoryName] = [];
+              for (let i = 0; i < 5; i++) {
+                const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
+                const question = newCategoryQuestions[i];
+                
+                gameState.board[newCategoryName].push({
+                  id: question.id,
+                  value,
+                  question: question.answer, // The clue shown to contestants
+                  answer: question.question, // What contestants must respond with
+                  revealed: false,
+                  isDaily: false,
+                  originalClueValue: question.clue_value || 0
+                });
+              }
+              
+              // Remove the old category from the board
+              delete gameState.board[category];
+              replacementFound = true;
+              break;
+            }
+          }
+          
+          // If we still can't find a replacement, this is a critical error
+          if (!replacementFound) {
+            console.error(`Could not find replacement for category "${category}". Cannot proceed.`);
+            throw new Error(`Failed to find a valid replacement category with 5 questions.`);
           }
         }
       }
@@ -1357,130 +1474,83 @@ io.on('connection', (socket) => {
     
     // Load game data from Jeopardy dataset
     try {
-      console.log(`Starting game in room ${roomCode} with date ${game.gameDate}`);
+      console.log(`Starting game in room ${roomCode}`);
       
-      // Load full game data for this date
-      const jeopardyGameData = await jeopardyDB.loadGameByDate(game.gameDate);
-      
-      // Log board details for debugging
-      console.log(`Loaded game data for date ${game.gameDate}:`);
-      console.log(`Round 1 has ${jeopardyGameData.round1.categories.length} categories`);
-      for (const category of jeopardyGameData.round1.categories) {
-        const questionCount = jeopardyGameData.round1.board[category]?.length || 0;
-        console.log(`Category "${category}" has ${questionCount} questions`);
+      // Build a random game board with the year range if specified
+      let yearRange = null;
+      if (game.yearRange && game.yearRange.start && game.yearRange.end) {
+        yearRange = {
+          start: parseInt(game.yearRange.start),
+          end: parseInt(game.yearRange.end)
+        };
       }
       
-      // Store the full game data for later rounds
-      game.jeopardyData = jeopardyGameData;
+      console.log(`Building game board with year range: ${yearRange ? `${yearRange.start}-${yearRange.end}` : 'all years'}`);
       
-      // Set current round data (Single Jeopardy)
-      const currentRoundData = jeopardyGameData.round1;
-      
-      // Limit to 6 categories, and randomly select if we have more than 6
-      let categories = currentRoundData.categories;
-      if (categories.length > 6) {
-        // Shuffle all available categories thoroughly to ensure randomness
-        categories = [...categories].sort(() => 0.5 - Math.random());
-        console.log(`Randomly selecting 6 categories from ${categories.length} available categories`);
-        categories = categories.slice(0, 6);
-      } else {
-        categories = categories.slice(0, 6);
-      }
-      
-      // Log selected categories
-      console.log(`Selected categories: ${categories.join(', ')}`);
-      
-      // Create the board - ensuring each category has all 5 questions
-      const board = {};
-      categories.forEach(category => {
-        if (currentRoundData.board[category]) {
-          // Ensure we have exactly 5 questions per category
-          if (currentRoundData.board[category].length === 5) {
-            board[category] = [...currentRoundData.board[category]];
-          } else if (currentRoundData.board[category].length > 5) {
-            // If we have more than 5, just take the first 5
-            board[category] = currentRoundData.board[category].slice(0, 5);
-          } else {
-            // If we have fewer than 5, copy what we have and log a warning
-            console.warn(`Category ${category} only has ${currentRoundData.board[category].length} questions, expected 5`);
-            board[category] = [...currentRoundData.board[category]];
-            
-            // This case should be handled by databaseLoader's ensureCompleteGameBoard function
-            // But double-check here to make sure we have a complete board
-            if (board[category].length < 5) {
-              console.error(`Category ${category} still has fewer than 5 questions. This should have been fixed by the database loader.`);
-              
-              // Fill with placeholder questions if needed
-              while (board[category].length < 5) {
-                const position = board[category].length;
-                const value = 200 * (position + 1); // Values: 200, 400, 600, 800, 1000
-                
-                board[category].push({
-                  text: `Placeholder clue for ${category} worth $${value}`,
-                  answer: `What is ${category}?`,
-                  value: value,
-                  originalValue: null,
-                  revealed: false
-                });
-              }
-            }
-          }
-        } else {
-          // This shouldn't happen if databaseLoader.ensureCompleteGameBoard is working correctly
-          console.error(`Category ${category} has no questions in the board data`);
-          board[category] = [];
-          
-          // Create placeholder questions
-          for (let i = 0; i < 5; i++) {
-            const value = 200 * (i + 1); // Values: 200, 400, 600, 800, 1000
-            board[category].push({
-              text: `Placeholder clue for ${category} worth $${value}`,
-              answer: `What is ${category}?`,
-              value: value,
-              originalValue: null,
-              revealed: false
-            });
-          }
+      try {
+        // Use the new function to build a random game board
+        const jeopardyGameData = await jeopardyDB.buildRandomGameBoard(yearRange);
+        
+        // Log board details for debugging
+        console.log(`Successfully built game board:`);
+        console.log(`Round 1 has ${jeopardyGameData.round1.categories.length} categories`);
+        for (const category of jeopardyGameData.round1.categories) {
+          const questionCount = jeopardyGameData.round1.board[category]?.length || 0;
+          console.log(`Category "${category}" has ${questionCount} questions with values: ${jeopardyGameData.round1.board[category].map(q => q.value).join(', ')}`);
         }
         
-        // Double-check values are correct for each position
-        for (let i = 0; i < board[category].length; i++) {
-          board[category][i].value = 200 * (i + 1); // Values: 200, 400, 600, 800, 1000
+        // Store the full game data for later rounds
+        game.jeopardyData = jeopardyGameData;
+        
+        // Set current round data (Single Jeopardy)
+        const currentRoundData = jeopardyGameData.round1;
+        
+        // Use the validated categories from our build process
+        const categories = currentRoundData.categories.slice(0, 6);
+        
+        // Create the board with the validated categories
+        const board = {};
+        for (const category of categories) {
+          // We've already validated these categories have exactly 5 questions
+          board[category] = [...currentRoundData.board[category]];
         }
-      });
-      
-      // Set the game properties
-      game.categories = categories;
-      game.board = board;
-      game.state = 'inProgress';
-      game.gameState = 'inProgress'; // For backward compatibility
-      
-      // Log the board structure for verification
-      console.log(`Board created with ${categories.length} categories`);
-      for (const category of categories) {
-        const questionCount = board[category]?.length || 0;
-        console.log(`Category "${category}" has ${questionCount} questions with values: ${board[category].map(q => q.value).join(', ')}`);
+        
+        // Set the game properties
+        game.categories = categories;
+        game.board = board;
+        game.state = 'inProgress';
+        game.gameState = 'inProgress'; // For backward compatibility
+        
+        // Log the board structure for verification
+        console.log(`Board created with ${categories.length} categories`);
+        for (const category of categories) {
+          const questionCount = board[category]?.length || 0;
+          console.log(`Category "${category}" has ${questionCount} questions with values: ${board[category].map(q => q.value).join(', ')}`);
+        }
+        
+        // Pick a random player to start
+        const nonHostPlayers = game.players.filter(p => !p.isHost);
+        if (nonHostPlayers.length > 0) {
+          const randomIndex = Math.floor(Math.random() * nonHostPlayers.length);
+          game.selectingPlayer = nonHostPlayers[randomIndex];
+        }
+        
+        // Notify all players that the game has started
+        io.to(roomCode).emit('gameStarted', {
+          game: {
+            ...game,
+            players: game.players.filter(p => !p.isHost) // Filter out host from player list
+          },
+          categories,
+          board,
+          selectingPlayerId: game.selectingPlayer?.id
+        });
+        
+        console.log(`Game in room ${roomCode} started with ${categories.length} categories`);
+      } catch (error) {
+        console.error(`Error building game board: ${error.message}`);
+        socket.emit('error', { message: `Failed to build game board: ${error.message}. Try adjusting year range or try again.` });
       }
-      
-      // Pick a random player to start
-      const nonHostPlayers = game.players.filter(p => !p.isHost);
-      if (nonHostPlayers.length > 0) {
-        const randomIndex = Math.floor(Math.random() * nonHostPlayers.length);
-        game.selectingPlayer = nonHostPlayers[randomIndex];
-      }
-      
-      // Notify all players that the game has started
-      io.to(roomCode).emit('gameStarted', {
-        game: {
-          ...game,
-          players: game.players.filter(p => !p.isHost) // Filter out host from player list
-        },
-        categories,
-        board,
-        selectingPlayerId: game.selectingPlayer?.id
-      });
-      
-      console.log(`Game in room ${roomCode} started with ${categories.length} categories`);
     } catch (error) {
       console.error(`Error starting game in room ${roomCode}:`, error);
       socket.emit('error', { message: `Failed to start game: ${error.message}` });
@@ -2168,20 +2238,8 @@ io.on('connection', (socket) => {
       game.answeringTimeout = null;
     }
     
-    // Deduct points based on question value
-    const deduction = currentQuestion.value;
-    const playerIndex = game.players.findIndex(p => p.id === player.id);
-    
-    if (playerIndex !== -1) {
-      game.players[playerIndex].score -= deduction;
-      
-      // Ensure score doesn't go below zero in tournament mode
-      if (game.tournamentMode && game.players[playerIndex].score < 0) {
-        game.players[playerIndex].score = 0;
-      }
-      
-      console.log(`Player ${player.name} score updated to ${game.players[playerIndex].score}`);
-    }
+    // NOTE: We don't deduct points here because they're already deducted in submitAnswer
+    // This prevents double deduction for wrong answers
     
     // Reset the buzzed player to allow others to buzz in
     game.buzzedPlayer = null;
