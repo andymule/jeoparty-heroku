@@ -59,14 +59,14 @@ describe('Socket.io Server', () => {
         callback({ success: true });
         
         // Notify room that a player joined
-        socket.to(roomCode).emit('player-joined', player);
+        socket.to(roomCode).emit('playerJoined', { player });
       });
       
       // Player buzzing in
       socket.on('buzz', (roomCode) => {
         // In a real implementation, we'd check if it's a valid buzz
         // For testing, we'll just emit the event directly
-        io.to(roomCode).emit('player-buzzed', {
+        io.to(roomCode).emit('playerBuzzed', {
           id: socket.id,
           timestamp: Date.now()
         });
@@ -74,7 +74,7 @@ describe('Socket.io Server', () => {
       
       // Host starting the game
       socket.on('start-game', (roomCode) => {
-        io.to(roomCode).emit('game-started');
+        io.to(roomCode).emit('gameStarted');
       });
     });
     
@@ -107,13 +107,13 @@ describe('Socket.io Server', () => {
     
     // Wait for second client to connect
     secondClient.on('connect', () => {
-      // Listen for player-joined event on first client
-      clientSocket.on('player-joined', (player) => {
-        expect(player.name).toBe('TestPlayer');
-        expect(player).toHaveProperty('score', 0);
+      // Listen for playerJoined event on first client
+      clientSocket.on('playerJoined', (data) => {
+        expect(data.player.name).toBe('TestPlayer');
+        expect(data.player).toHaveProperty('score', 0);
         
         // Clean up
-        clientSocket.off('player-joined');
+        clientSocket.off('playerJoined');
         secondClient.disconnect();
         done();
       });
@@ -129,13 +129,13 @@ describe('Socket.io Server', () => {
   });
   
   test('should broadcast when a player buzzes in', (done) => {
-    // Listen for player-buzzed event
-    clientSocket.on('player-buzzed', (data) => {
+    // Listen for playerBuzzed event
+    clientSocket.on('playerBuzzed', (data) => {
       expect(data.id).toBe(clientSocket.id);
       expect(data).toHaveProperty('timestamp');
       
       // Clean up
-      clientSocket.off('player-buzzed');
+      clientSocket.off('playerBuzzed');
       done();
     });
     
@@ -144,10 +144,10 @@ describe('Socket.io Server', () => {
   });
   
   test('should notify all players when the game starts', (done) => {
-    // Listen for game-started event
-    clientSocket.on('game-started', () => {
+    // Listen for gameStarted event
+    clientSocket.on('gameStarted', () => {
       // Clean up
-      clientSocket.off('game-started');
+      clientSocket.off('gameStarted');
       done();
     });
     

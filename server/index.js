@@ -1,3 +1,9 @@
+/**
+ * DEPRECATED: This file is being replaced by index-new.js which uses a more modular architecture.
+ * Please use `npm run dev:new` or `npm run start:new` to run the server with the new architecture.
+ * This file is kept for backward compatibility during the transition.
+ */
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');

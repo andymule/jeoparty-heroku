@@ -644,7 +644,6 @@ const GamePlayer = () => {
       };
       
       newSocket.on('playerBuzzed', handlePlayerBuzzed);
-      newSocket.on('player-buzzed', handlePlayerBuzzed);
       
       newSocket.on('answerJudged', (data) => {
         console.log('Answer judged:', data);

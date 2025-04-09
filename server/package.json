@@ -6,11 +6,16 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "start:new": "node index-new.js",
+    "dev:new": "nodemon index-new.js",
+    "runner:new": "node run-server-new.js",
     "import-data": "node scripts/import-data.js",
     "test": "jest --detectOpenHandles",
     "test:api": "jest api.test.js --detectOpenHandles",
     "test:flow": "jest game-flow.test.js --detectOpenHandles",
     "test:debug": "node ./tests/debug-api.js",
+    "test:db": "jest db.test.js --detectOpenHandles",
+    "test:with-server": "concurrently --kill-others-on-fail \"npm run dev:new\" \"sleep 5 && npm test\"",
     "postinstall": "npm list express || npm install express"
   },
   "keywords": [

@@ -4,21 +4,44 @@ const fs = require('fs');
 // In-memory dataset
 let inMemoryDataset = [];
 const datasetPath = path.join(__dirname, '../data/combined_season1-40.tsv');
+// Alternative dataset locations to try if primary location fails
+const alternateDatasetPaths = [
+  path.join(__dirname, '../data/jeopardy_clue_dataset-main/combined_season1-40.tsv'),
+  path.join(__dirname, '../../data/combined_season1-40.tsv'),
+  path.join(__dirname, '../../data/jeopardy_clue_dataset-main/combined_season1-40.tsv')
+];
 
 // Function to load the entire dataset into memory
 const loadDatasetIntoMemory = () => {
   try {
     console.log('Loading Jeopardy dataset into memory...');
-    if (!fs.existsSync(datasetPath)) {
-      console.error(`Dataset file not found at ${datasetPath}`);
-      throw new Error(`Dataset file not found at ${datasetPath}`);
+    
+    // Try the primary path first
+    let filePath = datasetPath;
+    let fileExists = fs.existsSync(filePath);
+    
+    // If primary path doesn't exist, try alternates
+    if (!fileExists) {
+      for (const altPath of alternateDatasetPaths) {
+        if (fs.existsSync(altPath)) {
+          filePath = altPath;
+          fileExists = true;
+          console.log(`Using alternate dataset path: ${filePath}`);
+          break;
+        }
+      }
+    }
+    
+    if (!fileExists) {
+      console.error(`Dataset file not found at ${datasetPath} or any alternate locations`);
+      throw new Error(`Dataset file not found. Tried: ${datasetPath} and alternates`);
     }
     
     const isProduction = process.env.NODE_ENV === 'production';
     // In production (Heroku), limit to 10,000 questions to avoid memory issues
     const maxQuestionsInProduction = 10000;
     
-    const data = fs.readFileSync(datasetPath, 'utf8');
+    const data = fs.readFileSync(filePath, 'utf8');
     const lines = data.split('\n');
     
     // Skip header row
@@ -134,22 +157,51 @@ const getRandomQuestionsByCategory = (categoryName, round, count = 5) => {
 const getQuestionsByYearRange = (startYear, endYear) => {
   return inMemoryDataset.filter(q => {
     if (!q.air_date) return false;
-    const year = new Date(q.air_date).getFullYear();
-    return year >= startYear && year <= endYear;
+    
+    // Parse the date correctly - ensure we're handling various date formats
+    let year;
+    try {
+      // Try to parse date as ISO format first (YYYY-MM-DD)
+      if (q.air_date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+        year = parseInt(q.air_date.substring(0, 4));
+      } else {
+        // Fall back to Date object parsing
+        year = new Date(q.air_date).getFullYear();
+      }
+      
+      // Handle invalid dates that return NaN
+      if (isNaN(year)) return false;
+      
+      return year >= startYear && year <= endYear;
+    } catch (error) {
+      console.warn(`Error parsing date: ${q.air_date}`, error);
+      return false;
+    }
   });
 };
 
 // Initialize the dataset
 const initializeDataset = async () => {
-  // Load the dataset into memory
-  const loaded = loadDatasetIntoMemory();
-  
-  if (!loaded || inMemoryDataset.length === 0) {
-    throw new Error('Failed to load dataset into memory');
+  try {
+    // If we already have data in memory (e.g., in test cases), don't reload
+    if (inMemoryDataset.length > 0) {
+      console.log('Dataset initialized successfully');
+      return true;
+    }
+    
+    // Load the dataset into memory
+    const loaded = loadDatasetIntoMemory();
+    
+    if (!loaded || inMemoryDataset.length === 0) {
+      throw new Error('Failed to load dataset into memory');
+    }
+    
+    console.log('Dataset initialized successfully');
+    return true;
+  } catch (error) {
+    console.error('Error initializing dataset:', error);
+    throw error;
   }
-  
-  console.log('Dataset initialized successfully');
-  return true;
 };
 
 module.exports = {

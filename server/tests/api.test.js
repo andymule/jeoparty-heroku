@@ -149,7 +149,7 @@ describe('API Endpoints', () => {
   });
   
   test('POST /api/games/create should create a new game with correct Content-Type', async () => {
-    const response = await request
+    const response = await agent
       .post('/api/games/create')
       .set('Content-Type', 'application/json')
       .send({ playerName: 'TestHost' });
@@ -162,7 +162,7 @@ describe('API Endpoints', () => {
   });
   
   test('POST /api/games/create should fail with incorrect Content-Type', async () => {
-    const response = await request
+    const response = await agent
       .post('/api/games/create')
       .set('Content-Type', 'text/plain')
       .send('playerName=TestHost');
