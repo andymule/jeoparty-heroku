@@ -12,12 +12,6 @@ This dataset contains Jeopardy! clues from Season 1 through Season 40 (July 2024
 
 There are 523,118 clues in total. Most of them can be found in combined_season1-40.tsv.
 
-There are individual files for each season (located in the seasons folder). These files are small enough that you should be able to open them with Microsoft Excel or Google Sheets.
-
-Clues appearing in special matches outside the daily syndicated program are found in extra_matches.tsv. This file has 7,224 clues and they do not appear in the combined dataset.
-
-There is a kids_teen_matches.tsv file which contains only clues that were featured in Kids and Teen Tournament matches. These clues are also in the combined dataset but this file is included for convenience.
-
 Column Information
 
 Label	Description
@@ -110,8 +104,5 @@ The game uses an integrated computer system that manages board displays, scoreke
 Each correct or incorrect response immediately updates the contestant’s score on a visible scoreboard, which is critical both for gameplay and spectator engagement.
 
 You will use the clues from data/combined_season1-40.tsv
-The desktop client lets you input a year range with text that you'd like to play a random game from. 
-If players select a question that requires an image to be shown as indicated by the clue database, instead just remove that question from the game altogether and treat it as though it has already been selected. [TODO in the future we can do a google image search? dont implement yet]. Generally, if something seems like it is missing, just act like that question has already been answered this round (I see some missing questions for example)
-i want checkAnswerCorrectness to be permissive. ignore case sensitivity for one, but also use a similarity algorithm (hopefully from an online library) and allow correct reponse if the user if very close to the actual response in a way that suggests they knew the answer. 
-
-keep it simple, keep it robust, keep it permissive
+The desktop client lets you input a year range with text that you'd like to play a random game from within. 
+i want checkAnswerCorrectness to be permissive. ignore case sensitivity for one, but also use a similarity algorithm (hopefully from an online library) and allow correct reponse if the user if very close to the actual response in a way that suggests they knew the answer. keep it simple, keep it robust, keep it permissive

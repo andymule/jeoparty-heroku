@@ -258,556 +258,12 @@ const GAME_ROUNDS = {
   GAME_OVER: 'gameOver'
 };
 
-// Function to set up the game board for a specific game
-async function setupGameBoard(roomCode) {
-  const gameState = gameStates[roomCode];
-  
-  if (!gameState) {
-    console.error(`Game state not found for room ${roomCode}`);
-    throw new Error(`Game state not found for room ${roomCode}`);
-  }
-  
-  try {
-    console.log(`Setting up game board for room ${roomCode} for round ${gameState.round}...`);
-    
-    // Start timing for performance analysis
-    console.time(`setupBoard_${roomCode}`);
-    
-    // Get all available categories - always use in-memory dataset
-    const allCategories = getCategories();
-    
-    if (!allCategories || allCategories.length === 0) {
-      console.error(`No categories available in dataset. Ensure the dataset is properly loaded.`);
-      throw new Error(`No categories available in dataset. Ensure the dataset is properly loaded.`);
-    }
-    
-    console.log(`Found ${allCategories.length} total categories in dataset`);
-    
-    // PERFORMANCE: Limit the number of categories we process to avoid hanging
-    // Shuffle first so we get a random sample
-    const shuffledAllCategories = [...allCategories].sort(() => 0.5 - Math.random());
-    // Process even fewer categories for faster startup
-    const sampleSize = Math.min(allCategories.length, 500);
-    const sampleCategories = shuffledAllCategories.slice(0, sampleSize);
-    
-    console.log(`Processing sample of ${sampleCategories.length} categories for better performance`);
-    
-    // Set a timeout to avoid hanging
-    let timeoutId;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        reject(new Error('Category processing timed out. Using random categories instead.'));
-      }, 3000); // 3 second timeout - reduced from 5s
-    });
-    
-    // Create a promise for the category filtering process
-    const filterPromise = (async () => {
-      // Filter categories by checking if they have enough questions for this round
-      let categoriesWithEnoughQuestions = [];
-      const roundNumber = gameState.round; // 1 for single jeopardy, 2 for double jeopardy
-      let processedCount = 0;
-      
-      // Shuffle the categories array to ensure different categories each time
-      const shuffledCategories = sampleCategories.sort(() => 0.5 - Math.random());
-      
-      // Process categories in smaller batches for better responsiveness
-      const batchSize = 20;
-      for (let i = 0; i < shuffledCategories.length; i += batchSize) {
-        const batch = shuffledCategories.slice(i, i + batchSize);
-        
-        for (const category of batch) {
-          processedCount++;
-          if (processedCount % 100 === 0) {
-            console.log(`Processed ${processedCount}/${shuffledCategories.length} categories...`);
-          }
-          
-          const categoryName = category.category || category;
-          const questions = getQuestionsByCategory(categoryName).filter(q => q.round === roundNumber);
-          
-          // Only include categories with at least 5 questions for this round
-          if (questions.length >= 5) {
-            categoriesWithEnoughQuestions.push({
-              category: categoryName,
-              questionCount: questions.length
-            });
-            
-            // PERFORMANCE: Once we have enough categories, stop processing more
-            // Increase to 30 to ensure we have enough even after filtering
-            if (categoriesWithEnoughQuestions.length >= 30) {
-              console.log(`Found ${categoriesWithEnoughQuestions.length} categories with enough questions - stopping early for performance`);
-              break;
-            }
-          }
-        }
-        
-        // Break from outer loop too if we have enough categories
-        if (categoriesWithEnoughQuestions.length >= 30) {
-          break;
-        }
-      }
-      
-      console.log(`Found ${categoriesWithEnoughQuestions.length} categories with at least 5 questions for round ${roundNumber}`);
-      
-      return categoriesWithEnoughQuestions;
-    })();
-    
-    // Race the filtering process against the timeout
-    let filteredCategories;
-    try {
-      filteredCategories = await Promise.race([filterPromise, timeoutPromise]);
-      // Clear the timeout if filtering completed successfully
-      clearTimeout(timeoutId);
-    } catch (error) {
-      console.warn(`Category filtering error: ${error.message}`);
-      // Fall back to a simple approach: just take random categories and filter them later
-      filteredCategories = shuffledAllCategories.slice(0, 20);
-    }
-    
-    // Optional filtering by year range
-    if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end && filteredCategories.length >= 10) {
-      const startYear = parseInt(gameState.yearRange.start);
-      const endYear = parseInt(gameState.yearRange.end);
-      
-      console.log(`Filtering questions by year range: ${startYear}-${endYear}`);
-      
-      // Use a smaller subset of categories for year filtering to improve performance
-      const categoriesToFilter = filteredCategories.slice(0, 20);
-      console.log(`Filtering year range for up to 20 categories (out of ${filteredCategories.length} total)`);
-      
-      try {
-        // This operation can be expensive, so wrap it in a timeout as well
-        let yearFilterTimeoutId;
-        const yearFilterPromise = new Promise(async (resolve) => {
-          // Get filtered questions by year range - LIMITED to just the categories we care about
-          const categoryNames = categoriesToFilter.map(c => c.category || c);
-          
-          // Process categories in smaller batches for better responsiveness
-          const validCategories = [];
-          const batchSize = 5;
-          
-          for (let i = 0; i < categoryNames.length; i += batchSize) {
-            const batch = categoryNames.slice(i, i + batchSize);
-            console.log(`Processing batch ${i/batchSize + 1} of ${Math.ceil(categoryNames.length/batchSize)}`);
-            
-            // Process each category in the batch
-            for (const category of batch) {
-              // Get questions only for this specific category (more efficient)
-              const categoryQuestions = getQuestionsByCategory(category);
-              
-              // Only keep questions for this round and in the year range
-              const filteredCatQuestions = categoryQuestions.filter(q => {
-                if (q.round !== gameState.round) return false;
-                if (!q.air_date) return false;
-                const year = new Date(q.air_date).getFullYear();
-                return year >= startYear && year <= endYear;
-              });
-              
-              // If enough questions, add to valid categories
-              if (filteredCatQuestions.length >= 5) {
-                validCategories.push({
-                  category,
-                  questionCount: filteredCatQuestions.length
-                });
-                
-                // Once we have enough categories, stop processing more
-                if (validCategories.length >= 8) { // Increase to 8 to ensure we get enough
-                  console.log(`Found ${validCategories.length} categories with enough questions in year range - stopping early`);
-                  break;
-                }
-              }
-            }
-            
-            // If we've found enough categories, stop processing batches
-            if (validCategories.length >= 8) break;
-          }
-          
-          console.log(`Found ${validCategories.length} categories with at least 5 questions in year range ${startYear}-${endYear} for round ${gameState.round}`);
-          
-          // Return valid categories if we found enough, otherwise return the original filtered categories
-          resolve(validCategories.length >= 6 ? validCategories : filteredCategories);
-        });
-        
-        const yearFilterTimeoutPromise = new Promise((resolve) => {
-          yearFilterTimeoutId = setTimeout(() => {
-            console.warn(`Year filtering timed out after 3 seconds - using already filtered categories`);
-            resolve(filteredCategories);
-          }, 3000); // 3 second timeout
-        });
-        
-        filteredCategories = await Promise.race([yearFilterPromise, yearFilterTimeoutPromise]);
-        clearTimeout(yearFilterTimeoutId);
-      } catch (error) {
-        console.warn(`Year filtering error: ${error.message} - using already filtered categories`);
-        // Keep existing filtered categories
-      }
-    }
-    
-    // Ensure we have enough categories
-    if (filteredCategories.length < 6) {
-      console.warn(`Not enough categories (${filteredCategories.length}) with sufficient questions for round ${gameState.round}. Processing more categories to find valid ones.`);
-      
-      // Process more categories instead of creating synthetic ones
-      let additionalCategories = [];
-      const remainingCategories = shuffledAllCategories.filter(cat => 
-        !filteredCategories.some(fc => (fc.category || fc) === (cat.category || cat))
-      );
-      
-      // Process in batches to avoid hanging
-      const maxBatches = 5;
-      const batchSize = 50;
-      
-      for (let batch = 0; batch < maxBatches && filteredCategories.length + additionalCategories.length < 6; batch++) {
-        const batchStart = batch * batchSize;
-        const batchCategories = remainingCategories.slice(batchStart, batchStart + batchSize);
-        
-        // Skip if no more categories to process
-        if (batchCategories.length === 0) break;
-        
-        console.log(`Processing additional batch ${batch + 1} with ${batchCategories.length} categories`);
-        
-        for (const category of batchCategories) {
-          const categoryName = category.category || category;
-          const questions = getQuestionsByCategory(categoryName).filter(q => q.round === gameState.round);
-          
-          if (questions.length >= 5) {
-            additionalCategories.push({
-              category: categoryName,
-              questionCount: questions.length
-            });
-            
-            if (filteredCategories.length + additionalCategories.length >= 6) {
-              break;
-            }
-          }
-        }
-      }
-      
-      // Add the additional categories
-      filteredCategories = [...filteredCategories, ...additionalCategories];
-    }
+const gameService = require('./services/gameService');
 
-    // If we still don't have enough categories, we need to abort or restart the process
-    if (filteredCategories.length < 6) {
-      console.error(`Failed to find 6 categories with at least 5 questions each. Found ${filteredCategories.length}.`);
-      throw new Error(`Could not find enough valid categories for the game. Try adjusting year range or restarting.`);
-    }
-    
-    // Randomly select 6 categories
-    const shuffledCategories = filteredCategories.sort(() => 0.5 - Math.random());
-    const selectedCategories = shuffledCategories.slice(0, 6);
-    
-    // Store selected categories
-    gameState.categories = selectedCategories.map(c => c.category || c);
-    
-    console.log(`Selected 6 categories for game board:`, gameState.categories);
-    
-    // Initialize board with empty questions
-    gameState.board = {};
-    
-    // Verify we have exactly 6 categories
-    if (gameState.categories.length !== 6) {
-      console.error(`Failed to create exactly 6 categories. Adding synthetic ones to complete the board.`);
-      
-      // Add missing categories to reach exactly 6
-      while (gameState.categories.length < 6) {
-        const syntheticCategory = `CATEGORY ${gameState.categories.length + 1}`;
-        if (!gameState.categories.includes(syntheticCategory)) {
-          gameState.categories.push(syntheticCategory);
-        }
-      }
-      
-      // Trim if we somehow got more than 6
-      if (gameState.categories.length > 6) {
-        gameState.categories = gameState.categories.slice(0, 6);
-      }
-    }
-    
-    // Global timeout for the board population
-    const populationPromise = (async () => {
-      // Populate board with questions for each category
-      for (const category of gameState.categories) {
-        // Get questions from in-memory dataset for this specific category and round
-        let categoryQuestions = getQuestionsByCategory(category).filter(q => q.round === gameState.round);
-        
-        console.log(`Found ${categoryQuestions.length} questions for category "${category}" in round ${gameState.round}`);
-        
-        // Apply year range filter if needed
-        if (gameState.yearRange && gameState.yearRange.start && gameState.yearRange.end) {
-          const startYear = parseInt(gameState.yearRange.start);
-          const endYear = parseInt(gameState.yearRange.end);
-          
-          categoryQuestions = categoryQuestions.filter(q => {
-            if (!q.air_date) return false;
-            const year = new Date(q.air_date).getFullYear();
-            return year >= startYear && year <= endYear;
-          });
-          
-          console.log(`After year filtering: ${categoryQuestions.length} questions for category "${category}" in round ${gameState.round}`);
-        }
-        
-        // Sort by value and select 5 questions
-        categoryQuestions.sort((a, b) => {
-          // Handle cases where clue_value might be undefined or 0
-          const aValue = a.clue_value || 0;
-          const bValue = b.clue_value || 0;
-          return aValue - bValue;
-        });
-        
-        // Initialize board for this category
-        gameState.board[category] = [];
-        
-        // Fallback: If not enough questions for this category, create placeholder questions
-        if (categoryQuestions.length < 5) {
-          console.warn(`Not enough questions (${categoryQuestions.length}) for category "${category}" in round ${gameState.round}. Skipping this category.`);
-          
-          // Instead of creating synthetic questions, we'll replace this category with a new one
-          const remainingCategories = shuffledAllCategories.filter(cat => 
-            !gameState.categories.includes(cat.category || cat)
-          );
-          
-          // Find a replacement category with enough questions
-          let replacementFound = false;
-          for (const newCategory of remainingCategories) {
-            const newCategoryName = newCategory.category || newCategory;
-            const newCategoryQuestions = getQuestionsByCategory(newCategoryName).filter(q => q.round === gameState.round);
-            
-            if (newCategoryQuestions.length >= 5) {
-              console.log(`Replacing category "${category}" with "${newCategoryName}" which has ${newCategoryQuestions.length} questions`);
-              
-              // Replace the category in the game state
-              const categoryIndex = gameState.categories.indexOf(category);
-              if (categoryIndex !== -1) {
-                gameState.categories[categoryIndex] = newCategoryName;
-              }
-              
-              // Set up the questions for this category
-              gameState.board[newCategoryName] = [];
-              for (let i = 0; i < 5; i++) {
-                const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
-                const question = newCategoryQuestions[i];
-                
-                gameState.board[newCategoryName].push({
-                  id: question.id,
-                  value,
-                  question: question.answer, // The clue shown to contestants
-                  answer: question.question, // What contestants must respond with
-                  revealed: false,
-                  isDaily: false,
-                  originalClueValue: question.clue_value || 0
-                });
-              }
-              
-              // Remove the old category from the board
-              delete gameState.board[category];
-              replacementFound = true;
-              break;
-            }
-          }
-          
-          // If no replacement found, this is a critical error
-          if (!replacementFound) {
-            console.error(`Could not find replacement for category "${category}". Cannot proceed.`);
-            throw new Error(`Failed to find a valid replacement category with 5 questions.`);
-          }
-        } else {
-          // Determine question distribution to maintain relative difficulty
-          // Distribute questions evenly across difficulty range
-          const totalQuestions = categoryQuestions.length;
-          const step = Math.floor(totalQuestions / 5);
-          
-          let questionsToUse = [];
-          for (let i = 0; i < 5; i++) {
-            // Pick questions that are progressively more difficult
-            const index = Math.min(i * step, totalQuestions - (5 - i));
-            questionsToUse.push(categoryQuestions[index]);
-          }
-          
-          // Add questions to the board with appropriate values
-          for (let i = 0; i < 5; i++) {
-            const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
-            const question = questionsToUse[i];
-            
-            // Check if this should be a daily double
-            const isDaily = 
-              (gameState.round === 1 && i >= 2 && Math.random() < 0.05 && !gameState.board.dailyDouble) ||
-              (gameState.round === 2 && i >= 1 && Math.random() < 0.1 && 
-               (!gameState.board.dailyDoubleCount || gameState.board.dailyDoubleCount < 2));
-            
-            if (isDaily) {
-              if (gameState.round === 1) {
-                gameState.board.dailyDouble = `${category}-${value}`;
-              } else {
-                if (!gameState.board.dailyDoubleCount) gameState.board.dailyDoubleCount = 0;
-                gameState.board.dailyDoubleCount++;
-                
-                if (gameState.board.dailyDouble) {
-                  gameState.board.dailyDouble2 = `${category}-${value}`;
-                } else {
-                  gameState.board.dailyDouble = `${category}-${value}`;
-                }
-              }
-            }
-            
-            gameState.board[category].push({
-              id: question.id,
-              value,
-              question: question.answer, // Question is actually the clue shown to players
-              answer: question.question, // Answer is what players must respond with
-              revealed: false,
-              isDaily,
-              originalClueValue: question.clue_value || 0 // Store original value for reference
-            });
-          }
-        }
-      }
-      
-      return true;
-    })();
-    
-    const populationTimeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => {
-        reject(new Error('Board population timed out. Using simplified questions.'));
-      }, 5000); // 5 second timeout
-    });
-    
-    try {
-      await Promise.race([populationPromise, populationTimeoutPromise]);
-      console.log(`Game board created for room ${roomCode} with categories:`, gameState.categories);
-    } catch (error) {
-      console.warn(`Board population warning: ${error.message}`);
-      
-      // Create simplified board with basic questions if timeout occurred
-      for (const category of gameState.categories) {
-        if (!gameState.board[category] || gameState.board[category].length < 5) {
-          console.log(`Category ${category} doesn't have enough questions. Finding replacement category.`);
-          
-          // Find a replacement category
-          const remainingCategories = shuffledAllCategories.filter(cat => 
-            !gameState.categories.includes(cat.category || cat)
-          );
-          
-          let replacementFound = false;
-          for (const newCategory of remainingCategories) {
-            const newCategoryName = newCategory.category || newCategory;
-            const newCategoryQuestions = getQuestionsByCategory(newCategoryName).filter(q => q.round === gameState.round);
-            
-            if (newCategoryQuestions.length >= 5) {
-              console.log(`Replacing category "${category}" with "${newCategoryName}" which has ${newCategoryQuestions.length} questions`);
-              
-              // Replace the category in the game state
-              const categoryIndex = gameState.categories.indexOf(category);
-              if (categoryIndex !== -1) {
-                gameState.categories[categoryIndex] = newCategoryName;
-              }
-              
-              // Set up the questions for this category
-              gameState.board[newCategoryName] = [];
-              for (let i = 0; i < 5; i++) {
-                const value = gameState.round === 1 ? (i + 1) * 200 : (i + 1) * 400;
-                const question = newCategoryQuestions[i];
-                
-                gameState.board[newCategoryName].push({
-                  id: question.id,
-                  value,
-                  question: question.answer, // The clue shown to contestants
-                  answer: question.question, // What contestants must respond with
-                  revealed: false,
-                  isDaily: false,
-                  originalClueValue: question.clue_value || 0
-                });
-              }
-              
-              // Remove the old category from the board
-              delete gameState.board[category];
-              replacementFound = true;
-              break;
-            }
-          }
-          
-          // If we still can't find a replacement, this is a critical error
-          if (!replacementFound) {
-            console.error(`Could not find replacement for category "${category}". Cannot proceed.`);
-            throw new Error(`Failed to find a valid replacement category with 5 questions.`);
-          }
-        }
-      }
-      
-      // Add at least one daily double
-      if (!gameState.board.dailyDouble) {
-        const randomCategoryIndex = Math.floor(Math.random() * gameState.categories.length);
-        const randomCategory = gameState.categories[randomCategoryIndex];
-        const randomQuestionIndex = Math.floor(Math.random() * 3) + 2; // Choose from indices 2, 3, or 4 (higher values)
-        const questionValue = gameState.round === 1 ? (randomQuestionIndex + 1) * 200 : (randomQuestionIndex + 1) * 400;
-        
-        gameState.board.dailyDouble = `${randomCategory}-${questionValue}`;
-        gameState.board[randomCategory][randomQuestionIndex].isDaily = true;
-      }
-    }
-    
-    console.timeEnd(`setupBoard_${roomCode}`);
-    console.log(`Game board fully created for room ${roomCode}`);
-  } catch (error) {
-    console.error('Error setting up game board:', error);
-    throw error; // Propagate error to caller
-  }
-}
-
-// Create a new game session
-app.post('/api/games', async (req, res) => {
-  try {
-    console.log('POST /api/games - Creating new game:', req.body);
-    const { hostName, yearRange } = req.body;
-    // Generate a unique 4-character room code
-    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-    
-    // Create a new game state
-    gameStates[roomCode] = {
-      roomCode,
-      hostId: null,
-      hostName,
-      players: [],
-      currentState: 'waiting',
-      board: null,
-      categories: [],
-      selectedQuestion: null,
-      round: 1,
-      yearRange,
-      scores: {},
-      activePlayer: null,
-      buzzerEnabled: false,
-      buzzedPlayers: [],
-      dailyDoubleWager: 0,
-      usedQuestions: [],
-      isInMemoryMode: true  // Always use in-memory mode
-    };
-    
-    // Create a randomly selected set of categories and questions for this game
-    try {
-      await setupGameBoard(roomCode);
-      console.log(`Game board successfully created for room ${roomCode}`);
-    } catch (setupError) {
-      console.error(`Error setting up game board for room ${roomCode}:`, setupError);
-      return res.status(500).json({ error: `Failed to setup game board: ${setupError.message}` });
-    }
-    
-    console.log(`Game successfully created with room code ${roomCode}`);
-    res.json({
-      roomCode,
-      gameState: gameStates[roomCode]
-    });
-  } catch (error) {
-    console.error('Error creating game:', error);
-    res.status(500).json({ 
-      error: 'Failed to create game', 
-      details: error.message,
-      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
-    });
-  }
-});
-
-// Add compatibility endpoint for /api/games/create
+// Keep only the /api/games/create endpoint and remove /games/create
 app.post('/api/games/create', async (req, res) => {
   console.log('POST /api/games/create - Request received:', req.body);
+  
   try {
     // Check if content type is correct
     if (!req.is('application/json')) {
@@ -832,57 +288,20 @@ app.post('/api/games/create', async (req, res) => {
       });
     }
     
-    console.log(`POST /api/games/create - Creating game with name: ${nameToUse}`);
-    
-    // Create a new game state
-    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-    
-    gameStates[roomCode] = {
-      roomCode,
-      hostId: `api-${Date.now()}`,
+    // Create the game using the game service
+    const game = await gameService.createGame({
       hostName: nameToUse,
-      players: [{
-        id: `api-${Date.now()}`,
-        name: nameToUse,
-        score: 0,
-        isHost: true
-      }],
-      currentState: 'waiting',
-      gameState: 'waiting',
-      board: null,
-      categories: [],
-      selectedQuestion: null,
-      round: 1,
-      yearRange: yearRange || { start: 1984, end: 2024 },
-      gameDate,
-      scores: {},
-      activePlayer: null,
-      buzzerEnabled: false,
-      buzzedPlayers: [],
-      dailyDoubleWager: 0,
-      usedQuestions: [],
-      isInMemoryMode: true
-    };
+      yearRange,
+      gameDate
+    });
     
-    // Create a randomly selected set of categories and questions for this game
-    try {
-      await setupGameBoard(roomCode);
-      console.log(`Game board successfully created for room ${roomCode}`);
-    } catch (setupError) {
-      console.error(`Error setting up game board for room ${roomCode}:`, setupError);
-      return res.status(500).json({
-        success: false, 
-        error: `Failed to setup game board: ${setupError.message}` 
-      });
-    }
-    
-    console.log(`Game successfully created with room code ${roomCode}`);
+    console.log(`Game successfully created with room code ${game.roomCode}`);
     res.json({
       success: true,
-      roomCode,
-      hostUrl: `/game/host/${roomCode}`,
-      playerUrl: `/game/player/${roomCode}`,
-      game: gameStates[roomCode]
+      roomCode: game.roomCode,
+      hostUrl: `/game/host/${game.roomCode}`,
+      playerUrl: `/game/player/${game.roomCode}`,
+      game
     });
   } catch (error) {
     console.error('Error creating game via /api/games/create:', error);
@@ -960,9 +379,39 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
 });
 
-// Socket.io connection handler
+// Update the socket.io connection handler to use the game service
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
+  
+  // Handle createGame event
+  socket.on('createGame', async ({ playerName, roomCode }, callback) => {
+    try {
+      console.log(`Create game request received: ${JSON.stringify({ playerName, roomCode })}`);
+      
+      const game = await gameService.createGame({
+        hostName: playerName,
+        roomCode,
+        yearRange: { start: 1984, end: 2024 }, // Add default yearRange
+        hostId: socket.id
+      });
+      
+      // Store room code in socket data for disconnect handling
+      socket.gameData = { 
+        roomCode, 
+        playerName,
+        isHost: true 
+      };
+      
+      // Join the socket room
+      socket.join(roomCode);
+      
+      console.log(`Game created successfully with room code ${game.roomCode}`);
+      callback({ success: true, game });
+    } catch (error) {
+      console.error('Error creating game:', error);
+      callback({ success: false, error: error.message });
+    }
+  });
   
   // Enhanced error handling for socket
   socket.on('error', (error) => {
@@ -973,208 +422,34 @@ io.on('connection', (socket) => {
   socket.on('disconnect', (reason) => {
     console.log(`User disconnected: ${socket.id}, reason: ${reason}`);
     
-    // Find the game where this player is a host
-    const hostedGame = Object.values(gameStates).find(game => 
-      game.hostId === socket.id || game.host === socket.id
-    );
-    
-    if (hostedGame) {
-      console.log(`Host disconnected from game ${hostedGame.roomCode}`);
+    // Check if the user was in a game
+    if (socket.gameData && socket.gameData.roomCode) {
+      const { roomCode } = socket.gameData;
       
-      // Notify all players that the host has disconnected
-      io.to(hostedGame.roomCode).emit('hostDisconnected');
-      
-      // Keep the game alive for a while in case host reconnects
-      // Set a timer to clean up the game after 5 minutes
-      setTimeout(() => {
-        if (gameStates[hostedGame.roomCode] && 
-            (!gameStates[hostedGame.roomCode].host || 
-             !io.sockets.sockets.get(gameStates[hostedGame.roomCode].host))) {
-          console.log(`Game ${hostedGame.roomCode} removed after host timeout`);
-          delete gameStates[hostedGame.roomCode];
-        }
-      }, 5 * 60 * 1000);
-    } else {
-      // Check if this player was in any games and mark them as disconnected
-      Object.values(gameStates).forEach(game => {
-        const playerIndex = game.players.findIndex(p => p.id === socket.id);
-        
-        if (playerIndex !== -1) {
-          console.log(`Player ${game.players[playerIndex].name} disconnected from game ${game.roomCode}`);
-          
-          // Mark player as disconnected but don't remove them
-          game.players[playerIndex].connected = false;
-          
-          // If this player was the buzzed player, update game state
-          if (game.buzzedPlayer && game.buzzedPlayer.id === socket.id) {
-            console.log(`Disconnected player was the buzzed player, handling as incorrect answer`);
-            
-            // Handle as if they answered incorrectly
-            if (game.answeringTimeout) {
-              clearTimeout(game.answeringTimeout);
-              game.answeringTimeout = null;
-            }
-            
-            // Re-enable buzzing for other players after a short delay
-            setTimeout(() => {
-              if (gameStates[game.roomCode]) {
-                game.buzzedPlayer = null;
-                io.to(game.roomCode).emit('buzzerReEnabled');
-              }
-            }, 1000);
-          }
-        }
-      });
-    }
-  });
-  
-  // Handle createGame event
-  socket.on('createGame', async (data) => {
-    console.log('Create game request received:', data);
-    
-    try {
-      let playerName = 'Unknown';
-      let roomCode = null;
-      let yearRange = null;
-      
-      // Extract data from various formats
-      if (typeof data === 'string') {
-        playerName = data;
-      } else if (typeof data === 'object') {
-        playerName = data.playerName || data.hostName || 'Host';
-        roomCode = data.roomCode;
-        yearRange = data.yearRange || (data.yearStart && data.yearEnd 
-          ? { start: data.yearStart, end: data.yearEnd } 
-          : null);
-      }
-      
-      console.log(`Create game: playerName=${playerName}, roomCode=${roomCode}, yearRange=`, yearRange);
-      
-      // Generate a room code if not provided, or check if the provided one exists
-      if (!roomCode) {
-        roomCode = generateRoomCode();
-        console.log(`createGame: generated room code: ${roomCode}`);
-      } else {
-        // If room exists, check if we can take it over
-        if (gameStates[roomCode]) {
-          console.log(`createGame: room ${roomCode} already exists`);
-          
-          // Check if the host is disconnected
-          const game = gameStates[roomCode];
-          const hostSocketId = game.hostId || game.host;
-          
-          // If we have a socket id for the host, check if they're still connected
-          if (hostSocketId) {
-            const hostSocket = io.sockets.sockets.get(hostSocketId);
-            
-            if (hostSocket && hostSocket.connected) {
-              console.log(`createGame: room ${roomCode} already has connected host ${hostSocketId}`);
-              socket.emit('error', { message: `Room ${roomCode} already exists and has a host` });
-              return;
-            }
-          }
-          
-          console.log(`createGame: taking over room ${roomCode} as new host`);
-        }
-      }
-      
-      // Extract game date if provided
-      const gameDate = typeof data === 'object' && data.gameDate ? data.gameDate : null;
-      
-      // Get a random date from the specified year range
-      const gameDateTime = gameDate || jeopardyDB.getRandomDate(yearRange);
-      
-      console.log(`createGame: creating game with date ${gameDateTime}`);
-      
-      // Create a new game state or update the existing one
-      if (!gameStates[roomCode]) {
-        gameStates[roomCode] = {
-          roomCode,
-          hostId: socket.id,
-          hostName: playerName,
-          players: [{
-            id: socket.id,
-            name: playerName,
-            score: 0,
-            isHost: true,
-            connected: true
-          }],
-          // Set initial game state
-          gameState: 'waiting',
-          categories: [],
-          board: {},
-          round: 1,
-          yearRange,
-          gameDate: gameDateTime,
-          // Track buzzer status
-          buzzerEnabled: false,
-          buzzedPlayer: null,
-          // Daily Double
-          dailyDoubleWager: 0,
-          // Set start time
-          startTime: Date.now()
-        };
-      } else {
-        // Update existing game state with new host info
-        gameStates[roomCode].hostId = socket.id;
-        gameStates[roomCode].hostName = playerName;
-        // Make sure this host is in the players list
-        if (!gameStates[roomCode].players.some(p => p.id === socket.id)) {
-          gameStates[roomCode].players.push({
-            id: socket.id,
-            name: playerName,
-            score: 0, 
-            isHost: true,
-            connected: true
-          });
-        }
-      }
-      
-      // Join the room
-      socket.join(roomCode);
-      socket.roomCode = roomCode;
-      
-      console.log(`createGame: setting up game board for room ${roomCode}`);
-      
-      // Set up the game board (this can take some time)
+      // Remove player from game using game service
       try {
-        await setupGameBoard(roomCode);
-        console.log(`createGame: game board set up successfully for room ${roomCode}`);
-      } catch (boardError) {
-        console.error(`createGame: error setting up game board for room ${roomCode}:`, boardError);
-        // Still continue, just with an error message
-        socket.emit('error', { message: `Error setting up game board: ${boardError.message}` });
-      }
-      
-      // Prepare response
-      const response = { 
-        roomCode,
-        hostName: playerName,
-        success: true,
-        game: {
-          roomCode,
-          hostId: socket.id,
-          hostName: playerName,
-          gameState: 'waiting',
-          players: gameStates[roomCode].players
+        const updatedGame = gameService.removePlayer(roomCode, socket.id);
+        
+        if (updatedGame) {
+          // Notify others in the room of the disconnection
+          io.to(roomCode).emit('playerDisconnected', {
+            playerId: socket.id,
+            playerName: socket.gameData.playerName,
+            players: updatedGame.players.filter(p => !p.isHost)
+          });
+          
+          console.log(`Player ${socket.gameData.playerName} disconnected from game ${roomCode}`);
+        } else {
+          console.log(`Game ${roomCode} removed after last player disconnected`);
         }
-      };
-      
-      console.log('Emitting gameCreated event with response:', response);
-      
-      // Send the room code back to the host
-      socket.emit('gameCreated', response);
-    } catch (error) {
-      console.error('Error in createGame socket handler:', error);
-      socket.emit('error', { 
-        message: `Failed to create game: ${error.message}`, 
-        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined 
-      });
+      } catch (error) {
+        console.error(`Error handling disconnect for game ${roomCode}:`, error);
+      }
     }
   });
   
   // Handle joining a game
-  socket.on('joinGame', (data) => {
+  socket.on('joinGame', async (data) => {
     try {
       // Check if we have the necessary data
       if (!data || !data.roomCode || !data.playerName) {
@@ -1187,13 +462,16 @@ io.on('connection', (socket) => {
       
       console.log(`Player ${playerName} attempting to join room ${roomCode}`);
       
-      // Check if the game exists
-      if (!gameStates[roomCode]) {
+      // Show active games for debugging
+      const activeGames = gameService.getAllGames();
+      console.log(`Active games (${activeGames.size}):`, Array.from(activeGames.keys()));
+      
+      // Check if the game exists using gameService
+      const game = gameService.getGame(roomCode);
+      if (!game) {
         console.log(`Game with room code ${roomCode} not found`);
         return socket.emit('gameNotFound');
       }
-      
-      const game = gameStates[roomCode];
       
       // Check if game is already in progress and not allowing new players
       if (game.gameState !== 'waiting' && !isPlayerRejoining(game, socket.id, playerName)) {
@@ -1201,114 +479,49 @@ io.on('connection', (socket) => {
         return socket.emit('error', { message: 'Game is already in progress' });
       }
       
-      // Check if a player with this name already exists
-      const existingPlayerIndex = game.players.findIndex(p => 
-        p.name.toLowerCase() === playerName.toLowerCase()
-      );
+      try {
+        // Use gameService to join the game
+        await gameService.joinGame({
+          roomCode,
+          playerName,
+          playerId: socket.id
+        });
       
-      if (existingPlayerIndex !== -1) {
-        // If this is a reconnection, update the player's socket ID
-        if (!game.players[existingPlayerIndex].connected) {
-          console.log(`Player ${playerName} is reconnecting to game ${roomCode}`);
-          
-          // Update socket ID and connection status
-          game.players[existingPlayerIndex].id = socket.id;
-          game.players[existingPlayerIndex].connected = true;
-          
-          // If this player was the buzzed player, update the reference
-          if (game.buzzedPlayer && game.buzzedPlayer.name === playerName) {
-            game.buzzedPlayer = game.players[existingPlayerIndex];
-          }
-          
-          // If this player was the selecting player, update the reference
-          if (game.selectingPlayer && game.selectingPlayer.name === playerName) {
-            game.selectingPlayer = game.players[existingPlayerIndex];
-          }
-        } else {
-          console.log(`Player name ${playerName} is already taken in game ${roomCode}`);
-          
-          // Check if the player with this name is actually disconnected but not marked as such
-          const existingPlayer = game.players[existingPlayerIndex];
-          const existingSocketId = existingPlayer.id;
-          const existingSocket = io.sockets.sockets.get(existingSocketId);
-          
-          if (!existingSocket || !existingSocket.connected) {
-            console.log(`Player ${playerName} appears to be disconnected but not marked as such. Allowing rejoin.`);
-            
-            // Force update the player's connection status and socket ID
-            existingPlayer.id = socket.id;
-            existingPlayer.connected = true;
-            
-            // Update references if needed
-            if (game.buzzedPlayer && game.buzzedPlayer.name === playerName) {
-              game.buzzedPlayer = existingPlayer;
-            }
-            if (game.selectingPlayer && game.selectingPlayer.name === playerName) {
-              game.selectingPlayer = existingPlayer;
-            }
-          } else {
-            // The player is truly connected - reject the new connection
-            return socket.emit('error', { message: 'Player name already taken' });
-          }
-        }
-      } else {
-        // Add the new player to the game
-        const newPlayer = {
-          id: socket.id,
-          name: playerName,
-          score: 0,
-          connected: true,
-          isHost: false
+        // Store socket data
+        socket.gameData = {
+          roomCode,
+          playerName
         };
         
-        game.players.push(newPlayer);
-        console.log(`Player ${playerName} joined game ${roomCode}`);
-      }
-      
-      // Join the socket to the room
-      socket.join(roomCode);
-      socket.roomCode = roomCode;
-      socket.playerName = playerName;
-      
-      // Get player data from the game state
-      const playerData = game.players.find(p => p.id === socket.id);
-      
-      // Emit event to the client that they've joined
-      socket.emit('gameJoined', {
-        roomCode,
-        gameState: game.gameState || game.state, // Handle both property names
-        players: game.players.filter(p => !p.isHost), // Filter out host from player list
-        player: playerData,
-        categories: game.categories,
-        board: game.board,
-        score: playerData ? playerData.score : 0
-      });
-      
-      // If the game is in progress, send current question if there is one
-      if ((game.gameState === 'questionActive' || game.state === 'questionActive') && game.currentQuestion) {
-        socket.emit('questionSelected', {
-          question: game.currentQuestion
+        // Join the socket room
+        socket.join(roomCode);
+        
+        // Get updated game data from the service
+        const updatedGame = gameService.getGame(roomCode);
+        const playerData = updatedGame.players.find(p => p.id === socket.id);
+        
+        // Emit event to the client that they've joined
+        socket.emit('gameJoined', {
+          roomCode,
+          gameState: updatedGame.gameState,
+          players: updatedGame.players.filter(p => !p.isHost),
+          player: playerData,
+          categories: updatedGame.categories,
+          board: updatedGame.board,
+          score: playerData ? playerData.score : 0
         });
         
-        // If player is already buzzed in, send that info
-        if (game.buzzedPlayer && game.buzzedPlayer.id === socket.id) {
-          socket.emit('playerBuzzed', {
-            player: game.buzzedPlayer
-          });
-        }
+        // Notify host and other players about the new player
+        socket.to(roomCode).emit('playerJoined', {
+          player: playerData,
+          players: updatedGame.players.filter(p => !p.isHost)
+        });
+        
+        console.log(`Player ${playerName} joined game ${roomCode}`);
+      } catch (error) {
+        console.error(`Error joining game: ${error.message}`);
+        socket.emit('error', { message: error.message });
       }
-      
-      // Notify host and other players that a new player joined
-      io.to(game.hostId || game.host).emit('playerJoined', {
-        player: playerData,
-        players: game.players.filter(p => !p.isHost) // Filter out host from player list
-      });
-      
-      // Also notify other players
-      socket.to(roomCode).emit('playerJoined', {
-        player: playerData,
-        players: game.players.filter(p => !p.isHost) // Filter out host from player list
-      });
     } catch (error) {
       console.error('Error joining game:', error);
       socket.emit('error', { message: `Failed to join game: ${error.message}` });
@@ -1451,110 +664,44 @@ io.on('connection', (socket) => {
     // Convert to uppercase for consistency
     roomCode = roomCode.toUpperCase();
     
-    if (!gameStates[roomCode]) {
+    // Get the game from gameService instead of gameStates
+    const game = gameService.getGame(roomCode);
+    if (!game) {
       console.error(`Game not found for room ${roomCode}`);
       return socket.emit('error', { message: 'Game not found' });
     }
     
-    const game = gameStates[roomCode];
-    
     // Check if this player is the host
-    if (socket.id !== game.hostId && socket.id !== game.host) {
+    if (socket.id !== game.hostId) {
       console.log(`Non-host ${socket.id} tried to start game in room ${roomCode}`);
       socket.emit('error', { message: 'Only the host can start the game' });
       return;
     }
     
     // Check if game is already in progress
-    if (game.state !== 'waiting' && game.gameState !== 'waiting') {
-      console.log(`Invalid startGame: game already started (${game.state || game.gameState})`);
+    if (game.gameState !== 'waiting') {
+      console.log(`Invalid startGame: game already started (${game.gameState})`);
       socket.emit('error', { message: 'Game already started' });
       return;
     }
     
-    // Load game data from Jeopardy dataset
-    try {
-      console.log(`Starting game in room ${roomCode}`);
-      
-      // Build a random game board with the year range if specified
-      let yearRange = null;
-      if (game.yearRange && game.yearRange.start && game.yearRange.end) {
-        yearRange = {
-          start: parseInt(game.yearRange.start),
-          end: parseInt(game.yearRange.end)
-        };
-      }
-      
-      console.log(`Building game board with year range: ${yearRange ? `${yearRange.start}-${yearRange.end}` : 'all years'}`);
-      
-      try {
-        // Use the new function to build a random game board
-        const jeopardyGameData = await jeopardyDB.buildRandomGameBoard(yearRange);
-        
-        // Log board details for debugging
-        console.log(`Successfully built game board:`);
-        console.log(`Round 1 has ${jeopardyGameData.round1.categories.length} categories`);
-        for (const category of jeopardyGameData.round1.categories) {
-          const questionCount = jeopardyGameData.round1.board[category]?.length || 0;
-          console.log(`Category "${category}" has ${questionCount} questions with values: ${jeopardyGameData.round1.board[category].map(q => q.value).join(', ')}`);
-        }
-        
-        // Store the full game data for later rounds
-        game.jeopardyData = jeopardyGameData;
-        
-        // Set current round data (Single Jeopardy)
-        const currentRoundData = jeopardyGameData.round1;
-        
-        // Use the validated categories from our build process
-        const categories = currentRoundData.categories.slice(0, 6);
-        
-        // Create the board with the validated categories
-        const board = {};
-        for (const category of categories) {
-          // We've already validated these categories have exactly 5 questions
-          board[category] = [...currentRoundData.board[category]];
-        }
-        
-        // Set the game properties
-        game.categories = categories;
-        game.board = board;
-        game.state = 'inProgress';
-        game.gameState = 'inProgress'; // For backward compatibility
-        
-        // Log the board structure for verification
-        console.log(`Board created with ${categories.length} categories`);
-        for (const category of categories) {
-          const questionCount = board[category]?.length || 0;
-          console.log(`Category "${category}" has ${questionCount} questions with values: ${board[category].map(q => q.value).join(', ')}`);
-        }
-        
-        // Pick a random player to start
-        const nonHostPlayers = game.players.filter(p => !p.isHost);
-        if (nonHostPlayers.length > 0) {
-          const randomIndex = Math.floor(Math.random() * nonHostPlayers.length);
-          game.selectingPlayer = nonHostPlayers[randomIndex];
-        }
-        
-        // Notify all players that the game has started
-        io.to(roomCode).emit('gameStarted', {
-          game: {
-            ...game,
-            players: game.players.filter(p => !p.isHost) // Filter out host from player list
-          },
-          categories,
-          board,
-          selectingPlayerId: game.selectingPlayer?.id
-        });
-        
-        console.log(`Game in room ${roomCode} started with ${categories.length} categories`);
-      } catch (error) {
-        console.error(`Error building game board: ${error.message}`);
-        socket.emit('error', { message: `Failed to build game board: ${error.message}. Try adjusting year range or try again.` });
-      }
-    } catch (error) {
-      console.error(`Error starting game in room ${roomCode}:`, error);
-      socket.emit('error', { message: `Failed to start game: ${error.message}` });
-    }
+    console.log(`Starting game in room ${roomCode}`);
+    
+    // Update game state
+    game.gameState = 'inProgress';
+    
+    // Notify all players that the game has started
+    io.to(roomCode).emit('gameStarted', {
+      game: {
+        ...game,
+        players: game.players.filter(p => !p.isHost) // Filter out host from player list
+      },
+      categories: game.categories,
+      board: game.board,
+      selectingPlayerId: game.selectingPlayer?.id
+    });
+    
+    console.log(`Game in room ${roomCode} started with ${game.categories.length} categories`);
   });
   
   // When a question is selected
@@ -1770,13 +917,12 @@ io.on('connection', (socket) => {
       
       console.log(`Player ${playerName} attempting to rejoin room ${roomCode}`);
       
-      // Check if the game exists
-      if (!gameStates[roomCode]) {
+      // Check if the game exists using gameService
+      const game = gameService.getGame(roomCode);
+      if (!game) {
         console.log(`Game with room code ${roomCode} not found`);
         return socket.emit('gameNotFound');
       }
-      
-      const game = gameStates[roomCode];
       
       // Look for the player in the game
       const playerIndex = game.players.findIndex(p => 
@@ -1793,50 +939,30 @@ io.on('connection', (socket) => {
       player.id = socket.id;
       player.connected = true;
       
-      // If this player was the buzzed player, update the reference
-      if (game.buzzedPlayer && game.buzzedPlayer.name === playerName) {
-        game.buzzedPlayer = player;
-      }
+      // Store socket data
+      socket.gameData = {
+        roomCode,
+        playerName
+      };
       
-      // If this player was the selecting player, update the reference
-      if (game.selectingPlayer && game.selectingPlayer.name === playerName) {
-        game.selectingPlayer = player;
-      }
-      
-      // Join the socket to the room
+      // Join the socket room
       socket.join(roomCode);
-      socket.roomCode = roomCode;
-      socket.playerName = playerName;
       
       // Emit event to the client that they've rejoined
       socket.emit('gameJoined', {
         roomCode,
-        gameState: game.gameState || game.state,
-        players: game.players.filter(p => !p.isHost), // Filter out host from player list
-        player: player,
+        gameState: game.gameState,
+        players: game.players.filter(p => !p.isHost),
+        player,
         categories: game.categories,
         board: game.board,
         score: player.score
       });
       
-      // If the game is in progress, send current question if there is one
-      if ((game.gameState === 'questionActive' || game.state === 'questionActive') && game.currentQuestion) {
-        socket.emit('questionSelected', {
-          question: game.currentQuestion
-        });
-        
-        // If player is already buzzed in, send that info
-        if (game.buzzedPlayer && game.buzzedPlayer.id === socket.id) {
-          socket.emit('playerBuzzed', {
-            player: game.buzzedPlayer
-          });
-        }
-      }
-      
-      // Notify host and other players that a player has rejoined
-      io.to(game.hostId || game.host).emit('playerRejoined', {
-        player: player,
-        players: game.players.filter(p => !p.isHost) // Filter out host from player list
+      // Notify others that a player has rejoined
+      socket.to(roomCode).emit('playerRejoined', {
+        player,
+        players: game.players.filter(p => !p.isHost)
       });
       
       console.log(`Player ${playerName} rejoined game ${roomCode}`);
@@ -2865,74 +1991,4 @@ app.post('/test-endpoint', (req, res) => {
     message: 'Test endpoint working',
     receivedData: req.body
   });
-});
-
-// Make sure the games/create endpoint is also registered (as a fallback)
-app.post('/games/create', async (req, res) => {
-  console.log('POST /games/create - Request received:', req.body);
-  // Forward to the API endpoint
-  try {
-    // Get the hostName
-    const { hostName, playerName, yearRange, gameDate } = req.body;
-    
-    // Check if we have a valid name parameter
-    const nameToUse = hostName || playerName;
-    
-    if (!nameToUse) {
-      console.error('POST /games/create - Missing required name parameter. Request body:', req.body);
-      return res.status(400).json({ 
-        error: 'Host name or player name is required',
-        requestBody: req.body 
-      });
-    }
-    
-    console.log(`POST /games/create - Creating game with name: ${nameToUse}`);
-    
-    // Create a new game state
-    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-    
-    gameStates[roomCode] = {
-      roomCode,
-      hostId: null,
-      hostName: nameToUse,
-      players: [],
-      currentState: 'waiting',
-      board: null,
-      categories: [],
-      selectedQuestion: null,
-      round: 1,
-      yearRange: yearRange || { start: 1984, end: 2024 },
-      gameDate,
-      scores: {},
-      activePlayer: null,
-      buzzerEnabled: false,
-      buzzedPlayers: [],
-      dailyDoubleWager: 0,
-      usedQuestions: [],
-      isInMemoryMode: true
-    };
-    
-    // Create a randomly selected set of categories and questions for this game
-    try {
-      await setupGameBoard(roomCode);
-      console.log(`Game board successfully created for room ${roomCode}`);
-    } catch (setupError) {
-      console.error(`Error setting up game board for room ${roomCode}:`, setupError);
-      return res.status(500).json({ error: `Failed to setup game board: ${setupError.message}` });
-    }
-    
-    console.log(`Game successfully created with room code ${roomCode}`);
-    res.json({
-      success: true,
-      roomCode,
-      gameState: gameStates[roomCode]
-    });
-  } catch (error) {
-    console.error('Error in /games/create endpoint:', error);
-    res.status(500).json({ 
-      error: 'Failed to create game', 
-      details: error.message,
-      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
-    });
-  }
 });

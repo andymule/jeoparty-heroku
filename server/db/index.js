@@ -18,11 +18,25 @@ function loadDataset() {
   if (questionsDataset) return questionsDataset;
   
   console.log('Loading J! Archive dataset...');
-  const dataPath = path.join(__dirname, '../../data/jeopardy_questions.json');
+  const dataPath = path.join(__dirname, '../../data/combined_season1-40.tsv');
   
   try {
+    console.log(`Loading dataset from ${dataPath}`);
     const rawData = fs.readFileSync(dataPath, 'utf8');
-    questionsDataset = JSON.parse(rawData);
+    
+    // Parse TSV data
+    const lines = rawData.split('\n');
+    const headers = lines[0].split('\t');
+    
+    questionsDataset = lines.slice(1).map(line => {
+      const values = line.split('\t');
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header.trim()] = values[index]?.trim() || '';
+      });
+      return obj;
+    });
+    
     console.log(`Loaded ${questionsDataset.length} questions from dataset`);
     
     // Build indexes after loading the dataset
@@ -31,6 +45,8 @@ function loadDataset() {
     return questionsDataset;
   } catch (error) {
     console.error('Error loading dataset:', error);
+    console.error('Error details:', error.message);
+    console.error('Stack:', error.stack);
     throw new Error('Failed to load Jeopardy dataset');
   }
 }
@@ -58,39 +74,55 @@ function buildIndexes() {
   
   // Process each question to build indexes
   for (const question of questionsDataset) {
-    const year = new Date(question.air_date).getFullYear();
-    const categoryId = question.category_id;
-    const value = parseInt(question.value?.replace(/[^0-9]/g, '') || '0');
-    
-    // Build category year index
-    if (!categoryYearIndex[year]) {
-      categoryYearIndex[year] = new Set();
-    }
-    categoryYearIndex[year].add(categoryId);
-    
-    // Build year questions index
-    if (!yearQuestionsIndex[year]) {
-      yearQuestionsIndex[year] = [];
-    }
-    yearQuestionsIndex[year].push(question);
-    
-    // Build difficulty index
-    // Map various values to standard ones (200, 400, 600, 800, 1000)
-    let standardValue = 200;
-    if (value > 0) {
-      if (value <= 200) standardValue = 200;
-      else if (value <= 400) standardValue = 400;
-      else if (value <= 600) standardValue = 600;
-      else if (value <= 800) standardValue = 800;
-      else standardValue = 1000;
-    }
-    
-    if (difficultyIndex[standardValue]) {
-      difficultyIndex[standardValue].push(question);
+    try {
+      const year = new Date(question.air_date).getFullYear();
+      const categoryId = question.category;  // Use category name as ID since TSV doesn't have category_id
+      const valueStr = question.value || '';
+      const value = parseInt(valueStr.replace(/[^0-9]/g, '') || '0');
+      
+      // Skip invalid entries
+      if (!year || isNaN(year)) continue;
+      
+      // Build category year index
+      if (!categoryYearIndex[year]) {
+        categoryYearIndex[year] = new Set();
+      }
+      categoryYearIndex[year].add(categoryId);
+      
+      // Build year questions index
+      if (!yearQuestionsIndex[year]) {
+        yearQuestionsIndex[year] = [];
+      }
+      yearQuestionsIndex[year].push(question);
+      
+      // Build difficulty index
+      // Map various values to standard ones (200, 400, 600, 800, 1000)
+      let standardValue = 200;
+      if (value > 0) {
+        if (value <= 200) standardValue = 200;
+        else if (value <= 400) standardValue = 400;
+        else if (value <= 600) standardValue = 600;
+        else if (value <= 800) standardValue = 800;
+        else standardValue = 1000;
+      }
+      
+      if (difficultyIndex[standardValue]) {
+        difficultyIndex[standardValue].push(question);
+      }
+    } catch (error) {
+      console.error('Error processing question:', question);
+      console.error('Error details:', error.message);
+      continue;
     }
   }
   
   console.log(`Built indexes with ${Object.keys(categoryYearIndex).length} years`);
+  
+  // Log some stats
+  console.log('Index statistics:');
+  console.log('Categories by year:', Object.keys(categoryYearIndex).length);
+  console.log('Questions by year:', Object.keys(yearQuestionsIndex).length);
+  console.log('Questions by difficulty:', Object.values(difficultyIndex).reduce((sum, arr) => sum + arr.length, 0));
 }
 
 /**
@@ -104,20 +136,24 @@ function getCategories() {
   
   // Extract unique categories
   for (const question of dataset) {
-    categoriesMap.set(question.category_id, {
-      id: question.category_id,
-      name: question.category,
-      clue_count: categoriesMap.has(question.category_id) 
-        ? categoriesMap.get(question.category_id).clue_count + 1 
+    const categoryName = question.category;
+    if (!categoryName) continue;
+    
+    categoriesMap.set(categoryName, {
+      id: categoryName,  // Use category name as ID
+      name: categoryName,
+      clue_count: categoriesMap.has(categoryName) 
+        ? categoriesMap.get(categoryName).clue_count + 1 
         : 1
     });
   }
   
   // Convert map to array and sort by name
-  categoriesCache = Array.from(categoriesMap.values()).sort((a, b) => 
-    a.name.localeCompare(b.name)
-  );
+  categoriesCache = Array.from(categoriesMap.values())
+    .filter(cat => cat.clue_count >= 5)  // Only include categories with enough clues
+    .sort((a, b) => a.name.localeCompare(b.name));
   
+  console.log(`Processed ${categoriesCache.length} unique categories with 5+ clues`);
   return categoriesCache;
 }
 

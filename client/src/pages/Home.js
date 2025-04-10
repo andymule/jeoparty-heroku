@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import io from 'socket.io-client';
 import axios from 'axios';
+import { createGame, getGameDates } from '../services/api';
+import { isMobile } from '../utils/deviceDetection';
 
 const HomeContainer = styled.div`
   display: flex;
@@ -197,19 +199,20 @@ const Home = () => {
   useEffect(() => {
     async function fetchDates() {
       try {
-        // Add year range as query parameters
-        const response = await axios.get('/api/jeopardy/dates', {
-          params: {
-            startYear: yearRange.start,
-            endYear: yearRange.end
-          }
-        });
+        setDebug('Fetching available dates...');
+        const data = await getGameDates(yearRange.start, yearRange.end);
         
-        if (response.data.success) {
-          setDates(response.data.dates);
+        if (data.success) {
+          setDates(data.dates);
+          setDebug('Dates loaded successfully');
+        } else {
+          console.error('Error in date response:', data);
+          setDebug('Failed to load dates: ' + (data.error || 'Unknown error'));
         }
       } catch (error) {
         console.error('Error fetching dates:', error);
+        setDebug('Failed to load dates: ' + (error.message || 'Connection error'));
+        // Don't show error message for date loading issues
       }
     }
     
@@ -252,88 +255,19 @@ const Home = () => {
         yearRange: yearRange
       };
       
-      // Try all possible endpoints in sequence until one works
-      const endpoints = [
-        '/api/games/create', 
-        '/api/games', 
-        '/games/create',
-        '/test-endpoint'
-      ];
+      // Create game using the API service
+      const data = await createGame(requestData);
       
-      // Try using the fetch API sequentially through all endpoints
-      for (const endpoint of endpoints) {
-        console.log(`Trying fetch API with ${endpoint}...`);
-        try {
-          const fetchResponse = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            },
-            body: JSON.stringify(requestData),
-          });
-          
-          console.log(`${endpoint} response status:`, fetchResponse.status);
-          
-          if (fetchResponse.ok) {
-            const data = await fetchResponse.json();
-            console.log(`Game created successfully with ${endpoint}:`, data);
-            
-            // Check if we have a roomCode in the response
-            if (data.roomCode) {
-              console.log(`Found roomCode: ${data.roomCode}, attempting to navigate to /game/host/${data.roomCode}`);
-              setDebug(`Redirecting to /game/host/${data.roomCode}`);
-              
-              // Try to redirect with a slight delay to allow logging to complete
-              setTimeout(() => {
-                navigate(`/game/host/${data.roomCode}`);
-              }, 100);
-              return;
-            } else if (data.success) {
-              console.log('Response indicates success but no roomCode, checking for nested data');
-              // Sometimes the room code might be nested in gameState
-              if (data.gameState && data.gameState.roomCode) {
-                console.log(`Found nested roomCode: ${data.gameState.roomCode}, navigating`);
-                setDebug(`Redirecting to /game/host/${data.gameState.roomCode}`);
-                
-                // Try to redirect with a slight delay to allow logging to complete
-                setTimeout(() => {
-                  navigate(`/game/host/${data.gameState.roomCode}`);
-                }, 100);
-                return;
-              } else if (data.game && data.game.roomCode) {
-                console.log(`Found roomCode in game object: ${data.game.roomCode}, navigating`);
-                setDebug(`Redirecting to /game/host/${data.game.roomCode}`);
-                
-                // Try to redirect with a slight delay to allow logging to complete
-                setTimeout(() => {
-                  navigate(`/game/host/${data.game.roomCode}`);
-                }, 100);
-                return;
-              }
-            }
-            
-            console.warn(`${endpoint} returned success but no valid roomCode:`, data);
-            setDebug(`${endpoint} returned success but couldn't find roomCode in response`);
-          } else {
-            console.error(`${endpoint} failed, status:`, fetchResponse.status);
-            setDebug(`${endpoint} failed with status ${fetchResponse.status}`);
-            try {
-              const errorText = await fetchResponse.text();
-              console.error(`${endpoint} error response:`, errorText);
-              setDebug(`${endpoint} error response: ${errorText.substring(0, 100)}...`);
-            } catch (e) {
-              console.error(`Couldn't read error response for ${endpoint}`, e);
-            }
-          }
-        } catch (fetchError) {
-          console.error(`Fetch error with ${endpoint}:`, fetchError);
-          setDebug(`Fetch error with ${endpoint}: ${fetchError.message}`);
-        }
+      if (data.roomCode) {
+        console.log(`Game created successfully with room code: ${data.roomCode}`);
+        setDebug(`Redirecting to /game/host/${data.roomCode}`);
+        
+        // Navigate to the host page
+        navigate(`/game/host/${data.roomCode}`);
+      } else {
+        console.error('No room code in response:', data);
+        setError('Failed to create game: invalid response from server');
       }
-      
-      // If we got here, all endpoints failed
-      setError('Failed to create game: all API endpoints failed. Please check server logs.');
     } catch (err) {
       console.error('Error creating game:', err);
       setError('Error creating game: ' + (err.response?.data?.message || err.message || 'Unknown error'));

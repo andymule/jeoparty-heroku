@@ -1,24 +1,18 @@
 const { v4: uuidv4 } = require('uuid');
 const gameLogic = require('./gameLogic');
 const answerChecker = require('./answerChecker');
-
-// In-memory store for active games
-const activeGames = new Map();
-
-// Helper to get active player count
-function getActivePlayerCount() {
-  let count = 0;
-  activeGames.forEach(game => {
-    count += game.players.length;
-  });
-  return count;
-}
+const gameService = require('../services/gameService');
+const SOCKET_EVENTS = require('../constants/socketEvents');
 
 // Initialize socket handlers
 function initializeSocketHandlers(io) {
+  // Track connected sockets
+  const connectedSockets = new Map();
+
   // Handle socket.io connections
-  io.on('connection', (socket) => {
-    console.log(`Socket connected: ${socket.id}`);
+  io.on(SOCKET_EVENTS.CONNECT, (socket) => {
+    console.log('Client connected:', socket.id);
+    connectedSockets.set(socket.id, socket);
     
     // Debug listener for easier troubleshooting
     socket.on('debug', (message) => {
@@ -28,49 +22,87 @@ function initializeSocketHandlers(io) {
 
     // Handle disconnections
     socket.on('disconnect', () => {
-      console.log(`Socket disconnected: ${socket.id}`);
+      console.log('Client disconnected:', socket.id);
       handlePlayerDisconnect(socket);
     });
 
     // Create a new game
-    socket.on('createGame', (data) => {
+    socket.on(SOCKET_EVENTS.CREATE_GAME, async ({ playerName, yearStart, yearEnd }, callback) => {
       try {
-        const playerName = data?.playerName || 'Host';
-        const roomCode = data?.roomCode;
-        const yearStart = data?.yearStart || null;
-        const yearEnd = data?.yearEnd || null;
+        if (!playerName || !yearStart || !yearEnd) {
+          throw new Error('Missing required parameters');
+        }
 
-        console.log(`Creating game for ${playerName} with room code ${roomCode}, year range: ${yearStart}-${yearEnd}`);
-        
-        handleCreateGame(socket, playerName, roomCode, yearStart, yearEnd)
-          .then(game => {
-            console.log(`Game created successfully for room ${game?.roomCode || 'unknown'}`);
-          })
-          .catch(error => {
-            console.error(`Failed to create game: ${error.message}`);
-            socket.emit('error', { message: `Failed to create game: ${error.message}` });
-          });
+        const game = await gameService.createGame({
+          hostName: playerName,
+          yearRange: { start: yearStart, end: yearEnd }
+        });
+
+        socket.join(game.roomCode);
+        socket.gameData = {
+          roomCode: game.roomCode,
+          playerId: game.hostId,
+          playerName
+        };
+
+        callback({
+          success: true,
+          roomCode: game.roomCode,
+          hostUrl: `/host/${game.roomCode}`,
+          playerUrl: `/play/${game.roomCode}`
+        });
+
       } catch (error) {
-        console.error('Error in createGame handler:', error);
-        socket.emit('error', { message: 'Failed to create game: ' + error.message });
+        console.error('Error creating game:', error);
+        callback({
+          success: false,
+          error: error.message
+        });
       }
     });
 
     // Join an existing game
-    socket.on('joinGame', (data) => {
+    socket.on(SOCKET_EVENTS.JOIN_GAME, async ({ roomCode, playerName }, callback) => {
       try {
-        const playerName = data?.playerName;
-        const roomCode = data?.roomCode;
-
-        if (!playerName || !roomCode) {
-          return socket.emit('error', { message: 'Player name and room code are required' });
+        if (!roomCode || !playerName) {
+          throw new Error('Room code and player name are required');
         }
 
-        console.log(`Player ${playerName} joining game ${roomCode}`);
-        handleJoinGame(socket, playerName, roomCode);
+        const game = await gameService.joinGame({
+          roomCode,
+          playerName,
+          playerId: socket.id
+        });
+
+        // Store game data in socket for easy access
+        socket.gameData = {
+          roomCode,
+          playerName
+        };
+
+        // Join the socket room
+        socket.join(roomCode);
+
+        // Notify all clients in the room about the new player
+        io.to(roomCode).emit(SOCKET_EVENTS.PLAYER_JOINED, {
+          player: {
+            id: socket.id,
+            name: playerName,
+            score: 0
+          },
+          players: game.players
+        });
+
+        callback({
+          success: true,
+          game
+        });
       } catch (error) {
-        console.error('Error in joinGame handler:', error);
-        socket.emit('error', { message: 'Failed to join game' });
+        console.error('Error joining game:', error);
+        callback({
+          success: false,
+          error: error.message
+        });
       }
     });
 
@@ -82,7 +114,7 @@ function initializeSocketHandlers(io) {
         }
 
         console.log(`Starting game ${roomCode}`);
-        handleStartGame(socket, roomCode);
+        handleStartGame(io, socket, { roomCode });
       } catch (error) {
         console.error('Error in startGame handler:', error);
         socket.emit('error', { message: 'Failed to start game' });
@@ -238,267 +270,181 @@ function initializeSocketHandlers(io) {
         socket.emit('error', { message: 'Failed to reveal Final Jeopardy answers' });
       }
     });
+
+    socket.on(SOCKET_EVENTS.DISCONNECT, () => {
+      console.log('Client disconnected:', socket.id);
+      
+      if (socket.gameData) {
+        const { roomCode } = socket.gameData;
+        const updatedGame = gameService.removePlayer(roomCode, socket.id);
+
+        if (updatedGame) {
+          io.to(roomCode).emit(SOCKET_EVENTS.PLAYER_DISCONNECTED, {
+            playerId: socket.id,
+            players: updatedGame.players
+          });
+        }
+      }
+    });
   });
 
   // Return methods that can be used by the main app
   return {
-    getActiveGames: () => Array.from(activeGames.values()),
-    getActivePlayerCount,
-    getGameById: (roomCode) => activeGames.get(roomCode)
+    getActiveGames: () => Array.from(gameService.getAllGames().values()),
+    getGameById: (roomCode) => gameService.getGame(roomCode)
   };
 }
 
 // Socket handler implementations
 
-// Create a new game
-async function handleCreateGame(socket, playerName, roomCode, yearStart, yearEnd) {
-  try {
-    // Generate a room code if not provided
-    const gameRoomCode = roomCode || gameLogic.generateRoomCode();
-    
-    // Check if game with this code already exists
-    if (activeGames.has(gameRoomCode)) {
-      return socket.emit('error', { message: 'Game with this code already exists' });
-    }
-    
-    // Create host player
-    const host = {
-      id: socket.id,
-      socketId: socket.id,
-      name: playerName,
-      score: 0,
-      isHost: true
-    };
-    
-    // Set up initial game board
-    console.log(`Creating game board for room ${gameRoomCode} with year range: ${yearStart}-${yearEnd}`);
-    const board = await gameLogic.setupGameBoard(yearStart, yearEnd);
-    
-    // Create game state
-    const game = {
-      roomCode: gameRoomCode,
-      hostId: host.id,
-      hostName: playerName,
-      players: [host],
-      gameState: 'waiting',
-      yearRange: yearStart && yearEnd ? { start: yearStart, end: yearEnd } : null,
-      board,
-      doubleJeopardyBoard: null,
-      finalJeopardy: null,
-      currentRound: 'jeopardy',
-      currentQuestion: null,
-      buzzingEnabled: false,
-      buzzedPlayer: null,
-      startTime: Date.now()
-    };
-    
-    // Store game in memory
-    activeGames.set(gameRoomCode, game);
-    
-    // Subscribe socket to game room
-    socket.join(gameRoomCode);
-    
-    // Send game created event
-    socket.emit('gameCreated', {
-      success: true,
-      roomCode: gameRoomCode,
-      game: game
-    });
-    
-    console.log(`Game created: ${gameRoomCode}`);
-    return game;
-  } catch (error) {
-    console.error('Error creating game:', error);
-    socket.emit('error', { message: 'Failed to create game' });
-    return null;
+// Update handleJoinGame to use game service
+async function handleJoinGame(socket, playerName, roomCode) {
+  const game = gameService.getGame(roomCode);
+  
+  if (!game) {
+    return socket.emit('gameNotFound');
   }
+  
+  // Check if game is already in progress
+  if (game.gameState !== 'waiting') {
+    return socket.emit('error', { message: 'Game is already in progress' });
+  }
+  
+  // Check if player with same name exists
+  const existingPlayer = game.players.find(p => 
+    p.name.toLowerCase() === playerName.toLowerCase()
+  );
+  
+  if (existingPlayer) {
+    return socket.emit('error', { message: 'Player name already taken' });
+  }
+  
+  // Create new player
+  const player = {
+    id: socket.id,
+    name: playerName,
+    score: 0,
+    isHost: false,
+    connected: true
+  };
+  
+  // Add player to game
+  game.players.push(player);
+  
+  // Join socket to room
+  socket.join(roomCode);
+  socket.roomCode = roomCode;
+  socket.playerName = playerName;
+  
+  // Notify everyone about the new player
+  socket.emit('gameJoined', {
+    success: true,
+    roomCode,
+    player,
+    game
+  });
+  
+  socket.to(roomCode).emit('playerJoined', {
+    player,
+    playerCount: game.players.length
+  });
 }
 
-// Join an existing game
-function handleJoinGame(socket, playerName, roomCode) {
-  try {
-    // Check if game exists
-    if (!activeGames.has(roomCode)) {
-      return socket.emit('gameNotFound');
-    }
-    
-    const game = activeGames.get(roomCode);
-    
-    // Check if game is already in progress and not accepting new players
-    if (game.gameState === 'in_progress' && !game.allowLateJoin) {
-      return socket.emit('error', { message: 'Game is already in progress' });
-    }
-    
-    // Check if player with same name already exists
-    const existingPlayerIndex = game.players.findIndex(p => 
-      p.name.toLowerCase() === playerName.toLowerCase()
-    );
-    
-    // Check if player is rejoining
-    const rejoinPlayerId = gameLogic.isPlayerRejoining(game, socket.id, playerName);
-    
-    if (rejoinPlayerId) {
-      // Player is rejoining, update their socket ID
-      const playerIndex = game.players.findIndex(p => p.id === rejoinPlayerId);
-      if (playerIndex >= 0) {
-        game.players[playerIndex].socketId = socket.id;
-        
-        // Join the socket to the game room
-        socket.join(roomCode);
-        
-        // Send game state to rejoining player
-        socket.emit('gameJoined', {
-          success: true,
-          roomCode,
-          player: game.players[playerIndex],
-          game: game,
-          rejoined: true
-        });
-        
-        // Notify other players
-        socket.to(roomCode).emit('playerRejoined', {
-          player: game.players[playerIndex]
-        });
-        
-        console.log(`Player ${playerName} (${socket.id}) rejoined game ${roomCode}`);
-        return;
-      }
-    } else if (existingPlayerIndex >= 0) {
-      // Player with same name exists but not rejoining, reject
-      return socket.emit('error', { message: 'A player with this name already exists in the game' });
-    }
-    
-    // Create new player
-    const newPlayer = {
-      id: socket.id,
-      socketId: socket.id,
-      name: playerName,
-      score: 0,
-      isHost: false
-    };
-    
-    // Add player to game
-    game.players.push(newPlayer);
-    
-    // Save updated game
-    activeGames.set(roomCode, game);
-    
-    // Join the socket to the game room
-    socket.join(roomCode);
-    
-    // Send game state to new player
-    socket.emit('gameJoined', {
-      success: true,
-      roomCode,
-      player: newPlayer,
-      game: game
-    });
-    
-    // Notify other players
-    socket.to(roomCode).emit('playerJoined', {
-      player: newPlayer,
-      playerCount: game.players.length
-    });
-    
-    console.log(`Player ${playerName} (${socket.id}) joined game ${roomCode}`);
-  } catch (error) {
-    console.error('Error joining game:', error);
-    socket.emit('error', { message: 'Failed to join game' });
-  }
-}
-
-// Handle player disconnect
+// Update handlePlayerDisconnect to use game service
 function handlePlayerDisconnect(socket) {
-  try {
-    // Find all games this player is in
-    activeGames.forEach((game, roomCode) => {
-      const playerIndex = game.players.findIndex(p => p.socketId === socket.id);
-      
-      if (playerIndex >= 0) {
-        const player = game.players[playerIndex];
-        
-        // Mark player as disconnected but don't remove them
-        // This allows them to rejoin later
-        player.disconnected = true;
-        
-        // Update the game state
-        activeGames.set(roomCode, game);
-        
-        // Notify other players
-        socket.to(roomCode).emit('playerDisconnected', {
-          playerId: player.id,
-          playerName: player.name
-        });
-        
-        console.log(`Player ${player.name} (${socket.id}) disconnected from game ${roomCode}`);
-        
-        // If host disconnected, notify all players
-        if (player.isHost) {
-          socket.to(roomCode).emit('hostDisconnected');
-          console.log(`Host disconnected from game ${roomCode}`);
-        }
-        
-        // Clean up empty games after a delay
-        setTimeout(() => {
-          cleanupEmptyGames();
-        }, 60000); // Check after 1 minute
-      }
-    });
-  } catch (error) {
-    console.error('Error handling disconnect:', error);
+  if (!socket.roomCode) return;
+  
+  const game = gameService.getGame(socket.roomCode);
+  if (!game) return;
+  
+  const playerIndex = game.players.findIndex(p => p.id === socket.id);
+  if (playerIndex === -1) return;
+  
+  const player = game.players[playerIndex];
+  player.connected = false;
+  
+  // Notify other players
+  socket.to(game.roomCode).emit('playerDisconnected', {
+    playerId: player.id,
+    playerName: player.name
+  });
+  
+  // If host disconnected, notify all players
+  if (player.isHost) {
+    socket.to(game.roomCode).emit('hostDisconnected');
   }
+  
+  // Clean up empty games after a delay
+  setTimeout(() => {
+    cleanupEmptyGames();
+  }, 60000);
 }
 
-// Clean up games with no connected players
+// Update cleanupEmptyGames to use game service
 function cleanupEmptyGames() {
-  try {
-    activeGames.forEach((game, roomCode) => {
-      // Check if all players are disconnected
-      const allDisconnected = game.players.every(p => p.disconnected);
-      
-      // If all players have been disconnected for a while, remove the game
-      if (allDisconnected) {
-        console.log(`Removing inactive game ${roomCode}`);
-        activeGames.delete(roomCode);
-      }
-    });
-  } catch (error) {
-    console.error('Error cleaning up games:', error);
-  }
+  const games = gameService.getAllGames();
+  
+  games.forEach((game, roomCode) => {
+    // Check if all players are disconnected
+    const allDisconnected = game.players.every(p => !p.connected);
+    
+    if (allDisconnected) {
+      console.log(`Removing inactive game ${roomCode}`);
+      gameService.removeGame(roomCode);
+    }
+  });
 }
 
 // Start a game
-async function handleStartGame(socket, roomCode) {
+const handleStartGame = async (io, socket, { roomCode }) => {
+  console.log(`[SOCKET] Start game request for room ${roomCode}`);
+  
   try {
-    // Check if game exists
-    if (!activeGames.has(roomCode)) {
-      return socket.emit('error', { message: 'Game not found' });
+    if (!roomCode) {
+      throw new Error('Room code is required');
     }
     
-    const game = activeGames.get(roomCode);
+    // Get the game from the game service
+    const game = gameService.getGame(roomCode);
+    if (!game) {
+      throw new Error(`Game with room code ${roomCode} not found`);
+    }
     
-    // Verify this is the host
+    // Check if this player is the host
     if (socket.id !== game.hostId) {
-      return socket.emit('error', { message: 'Only the host can start the game' });
+      throw new Error('Only the host can start the game');
     }
+    
+    // Check if game is already in progress
+    if (game.gameState !== 'waiting') {
+      throw new Error('Game is already in progress');
+    }
+    
+    console.log(`Starting game in room ${roomCode}`);
     
     // Update game state
-    game.gameState = 'in_progress';
-    game.currentRound = 'jeopardy';
+    game.gameState = 'inProgress';
     
-    // Update the game
-    activeGames.set(roomCode, game);
+    // Notify all players that the game has started
+    io.to(roomCode).emit(SOCKET_EVENTS.GAME_STARTED, {
+      game: {
+        ...game,
+        players: game.players.filter(p => !p.isHost) // Filter out host from player list
+      },
+      categories: game.categories,
+      board: game.board,
+      selectingPlayerId: game.selectingPlayer?.id
+    });
     
-    // Notify all players
-    socket.to(roomCode).emit('gameStarted', { game });
-    socket.emit('gameStarted', { game });
+    console.log(`Game in room ${roomCode} started with ${game.categories.length} categories`);
     
-    console.log(`Game ${roomCode} started by host ${socket.id}`);
+    return { success: true };
   } catch (error) {
-    console.error('Error starting game:', error);
-    socket.emit('error', { message: 'Failed to start game' });
+    console.error(`Error starting game: ${error.message}`);
+    socket.emit(SOCKET_EVENTS.ERROR, { message: error.message });
+    return { success: false, error: error.message };
   }
-}
+};
 
 // Implement other handlers...
 

@@ -30,18 +30,13 @@ const app = express();
 const server = http.createServer(app);
 
 // Configure CORS
-const corsOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : '*';
+const isDevelopment = process.env.NODE_ENV !== 'production';
+const corsOrigins = isDevelopment ? ['http://localhost:3001', 'http://localhost:3000'] : 
+  (process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : '*');
+
 console.log('CORS Origins:', corsOrigins);
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow server-to-server requests (null origin)
-    if (!origin || corsOrigins === '*' || corsOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn(`CORS blocked request from origin: ${origin}`);
-      callback(null, false);
-    }
-  },
+  origin: corsOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -57,29 +52,32 @@ app.use((req, res, next) => {
   next();
 });
 
-// Set up API routes
+// Set up API routes - this must come BEFORE static file handling
 app.use('/api', apiRoutes);
 
-// Serve static files from the client build directory
-app.use(express.static(path.join(__dirname, '../client/build')));
-
-// Fallback route handler for SPA
-app.get('*', (req, res, next) => {
-  // Skip API routes (they're handled by the API router)
-  if (req.url.startsWith('/api/')) {
-    return next();
-  }
+// Serve static files from the client build directory in production only
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/build')));
   
-  // Fallback to the React app
-  res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
-});
+  // Fallback route handler for SPA in production
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
+  });
+} else {
+  // In development, we don't need to serve static files or handle SPA routing
+  // as the React dev server will handle that
+  app.get('*', (req, res) => {
+    res.status(404).json({ error: 'Not found' });
+  });
+}
 
-// Initialize Socket.io
+// Initialize Socket.io with CORS
 const io = socketIo(server, {
   cors: {
     origin: corsOrigins,
     methods: ["GET", "POST"],
-    credentials: true
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
   }
 });
 

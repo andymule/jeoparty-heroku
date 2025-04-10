@@ -515,7 +515,16 @@ const GameHost = () => {
       console.log(`Emitting createGame event for room: ${roomCode}`);
       newSocket.emit('createGame', {
         playerName: playerName || 'Host',
-        roomCode: roomCode
+        roomCode: roomCode,
+        yearRange: { start: 1984, end: 2024 } // Add default year range
+      }, (response) => {
+        if (response.success) {
+          // Store game data
+          setGameState('waiting');
+          setPlayers(response.game?.players || []);
+        } else {
+          setError(`Failed to create game: ${response.error}`);
+        }
       });
     });
     
@@ -576,20 +585,6 @@ const GameHost = () => {
     newSocket.on('error', (data) => {
       console.error('Game error:', data);
       setError(data.message || 'An unknown error occurred');
-    });
-    
-    newSocket.on('gameCreated', (data) => {
-      console.log('Game created successfully:', data);
-      if (!data || !data.roomCode) {
-        console.error('Invalid gameCreated response:', data);
-        setError('Invalid response from server');
-        return;
-      }
-      
-      // Update game state with received data
-      console.log('Setting game state to waiting and updating players');
-      setGameState('waiting');
-      setPlayers(data.game?.players || []);
     });
     
     newSocket.on('playerJoined', (data) => {
